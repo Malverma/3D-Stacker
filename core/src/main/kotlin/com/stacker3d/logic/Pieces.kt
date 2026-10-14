@@ -8,7 +8,13 @@ data class Vec3i(val x: Int, val y: Int, val z: Int) {
 }
 
 /** The piece set (spec §6). [rgb] is the cube color as 0xRRGGBB. */
-enum class PieceType(val rgb: Int, val cells: List<Vec3i>, val kind: Kind = Kind.NORMAL) {
+enum class PieceType(
+    val rgb: Int,
+    val cells: List<Vec3i>,
+    val kind: Kind = Kind.NORMAL,
+    /** For X pieces: index into [cells] of the X cube. Cell order survives rotation, so this stays valid. */
+    val xIndex: Int = -1,
+) {
     SINGLE(0xFFD23F, cells("000")),
     DOMINO(0xFF6B6B, cells("000", "100")),
     BAR(0x4D96FF, cells("000", "100", "200")),
@@ -19,16 +25,31 @@ enum class PieceType(val rgb: Int, val cells: List<Vec3i>, val kind: Kind = Kind
     /** Clears nearby cubes where it lands; never costs a heart. */
     BOMB(0x2E2E3A, cells("000"), Kind.BOMB),
 
-    /** Costs a heart if it lands on the board; steer it off the edge instead. */
-    X_BLOCK(0xE8344E, cells("000"), Kind.X),
+    /**
+     * A domino / bar with an X cube on one end. The plain cubes stack normally; the X cube costs a heart if it
+     * lands on the board, so it has to hang off the edge while the rest stays on.
+     */
+    X_DOMINO(0xFF6B6B, cells("000", "100"), Kind.X, xIndex = 1),
+    X_BAR(0x4D96FF, cells("000", "100", "200"), Kind.X, xIndex = 2),
 
     /** Shop unlock: stays in the tower like a normal cube and restores a heart (up to the max). */
     HEART(0xFF8FB8, cells("000"), Kind.HEART);
 
     enum class Kind { NORMAL, BOMB, X, HEART }
 
+    /** The type stored in the tower for this piece's plain cubes (X pieces stack as their base shape). */
+    val stackType: PieceType
+        get() = when (this) {
+            X_DOMINO -> DOMINO
+            X_BAR -> BAR
+            else -> this
+        }
+
+    fun isX(cellIndex: Int) = cellIndex == xIndex
+
     companion object {
         val normals = entries.filter { it.kind == Kind.NORMAL }
+        val xPieces = entries.filter { it.kind == Kind.X }
     }
 }
 

@@ -125,9 +125,9 @@ class GameLogicTest {
 
         val last = rec.landings.last()
         assertEquals(v(0, 4, 0), last.impact)
-        // Columns within one cell of (0,0) lose layers 2..3 (the blast reaches 2 below the bomb).
-        assertEquals(4 * 2, last.cleared.size)
-        for ((x, z) in listOf(0 to 0, 1 to 0, 0 to 1, 1 to 1)) assertEquals(2, logic.board.height(x, z))
+        // Columns within one cell of (0,0) lose layer 3 (the blast reaches 1 below the bomb).
+        assertEquals(4, last.cleared.size)
+        for ((x, z) in listOf(0 to 0, 1 to 0, 0 to 1, 1 to 1)) assertEquals(3, logic.board.height(x, z))
         assertEquals(4, logic.board.height(2, 2))
         assertEquals(3, logic.hearts)
         assertEquals(4, logic.towerHeight)
@@ -137,42 +137,73 @@ class GameLogicTest {
     fun `bomb lets cubes above the blast drop down`() {
         fillLevel(2)
         repeat(4) { single(2, 2) } // (2,2) is 6 tall
-        drop(listOf(v(0, 0, 0)), 1, 1, PieceType.BOMB) // bomb at (1,2,1): clears layers 0..3 next to it
+        drop(listOf(v(0, 0, 0)), 1, 1, PieceType.BOMB) // bomb at (1,2,1): clears layers 1..3 next to it
 
         val last = rec.landings.last()
-        assertEquals(2, logic.board.height(2, 2)) // layers 0..3 gone, 4..5 dropped to 0..1
-        assertTrue(last.shifted.contains(PlacedCube(v(2, 5, 2), v(2, 1, 2))))
-        assertEquals(0, logic.board.height(1, 1))
+        assertEquals(3, logic.board.height(2, 2)) // layers 1..3 gone, 4..5 dropped to 1..2
+        assertTrue(last.shifted.contains(PlacedCube(v(2, 5, 2), v(2, 2, 2))))
+        assertEquals(1, logic.board.height(1, 1))
     }
 
+    private val xDomino get() = PieceType.X_DOMINO.cells // X cube is index 1, at x+1
+
     @Test
-    fun `x block on the board costs a heart and leaves nothing behind`() {
-        drop(listOf(v(0, 0, 0)), 1, 1, PieceType.X_BLOCK)
-        assertTrue(rec.landings.last().xHit)
+    fun `x cube on the board costs a heart and never joins the tower`() {
+        drop(xDomino, 0, 1, PieceType.X_DOMINO) // plain cube at (0,1), X at (1,1)
+        val last = rec.landings.last()
+        assertTrue(last.xHit)
         assertEquals(2, logic.hearts)
+        assertEquals(1, logic.board.height(0, 1))
         assertEquals(0, logic.board.height(1, 1))
+        assertEquals(PieceType.DOMINO, logic.board.typeAt(0, 0, 1))
     }
 
     @Test
-    fun `x block steered off the board is safe`() {
-        awaitPiece(PieceType.X_BLOCK)
-        assertTrue(logic.move(-1, 0))
-        assertTrue(logic.move(-1, 0)) // fully off the board is allowed for X
-        assertFalse(logic.move(-1, 0)) // but only one ring out
-        logic.hardDrop()
+    fun `x cube hung off the edge is safe and the rest stacks`() {
+        drop(xDomino, 2, 1, PieceType.X_DOMINO) // plain cube at (2,1), X at (3,1) off the board
         val last = rec.landings.last()
         assertTrue(last.dodged)
         assertEquals(3, logic.hearts)
-        assertEquals(GameLogic.DODGE_BONUS, logic.score)
+        assertEquals(1, logic.board.height(2, 1))
+        assertTrue(logic.score >= GameLogic.DODGE_BONUS)
     }
 
     @Test
-    fun `dodged x block keeps falling until it passes the tower`() {
-        awaitPiece(PieceType.X_BLOCK)
-        logic.debugPlace(listOf(v(0, 0, 0)), -1, 1)
-        repeat(20) { logic.update(1f) }
-        assertTrue(rec.landings.any { it.dodged })
-        assertEquals(3, logic.hearts)
+    fun `x bar needs its plain cubes on the board too`() {
+        // Cells at x=2 (plain, on), x=3 (plain, off), x=4 (X, off).
+        drop(PieceType.X_BAR.cells, 2, 0, PieceType.X_BAR)
+        val last = rec.landings.last()
+        assertTrue(last.dodged)
+        assertEquals(1, last.lost.size)
+        assertEquals(2, logic.hearts) // one heart for the spilled plain cube
+    }
+
+    @Test
+    fun `x pieces can't leave the board entirely`() {
+        awaitPiece(PieceType.X_DOMINO)
+        logic.debugPlace(xDomino, 2, 1)
+        assertFalse(logic.move(1, 0))
+    }
+
+    @Test
+    fun `x marker follows the piece through rotations`() {
+        awaitPiece(PieceType.X_BAR)
+        logic.debugPlace(PieceType.X_BAR.cells, 0, 1)
+        repeat(3) { logic.rotate() }
+        logic.tip()
+        val c = logic.current!!.cells
+        fun dist(a: Vec3i, b: Vec3i) = kotlin.math.abs(a.x - b.x) + kotlin.math.abs(a.y - b.y) + kotlin.math.abs(a.z - b.z)
+        // The X cube is still the far end of the bar: two cells from cell 0, next to the middle cube.
+        assertEquals(2, dist(c[0], c[PieceType.X_BAR.xIndex]))
+        assertEquals(1, dist(c[1], c[PieceType.X_BAR.xIndex]))
+    }
+
+    @Test
+    fun `game speeds up as the score climbs`() {
+        val start = logic.fallInterval
+        fillLevel(4)
+        assertTrue(logic.fallInterval < start)
+        assertTrue(logic.fallInterval >= GameLogic.MIN_FALL_INTERVAL)
     }
 
     @Test
@@ -227,6 +258,7 @@ class GameLogicTest {
             repeat(300) {
                 while (l.current == null) l.update(0.1f)
                 if (l.current!!.type == PieceType.HEART) hearts++
+                if (l.current!!.type.kind == PieceType.Kind.X) l.debugSpawn(PieceType.SINGLE)
                 // Keep the board level so the gap rule never ends the run.
                 val col = (0 until 9).minBy { l.board.height(it % 3, it / 3) }
                 l.debugPlace(listOf(v(0, 0, 0)), col % 3, col / 3) || l.debugPlace(l.current!!.cells, -1, 1)

@@ -35,7 +35,7 @@ class PiecePreview(private val models: Models, private val size: Int = 256) : Di
         cam.lookAt(cx, 0.5f, cz)
         cam.update()
 
-        val list = instances.getOrPut(type) { cells.map { models.instance(type) } }
+        val list = instances.getOrPut(type) { cells.indices.map { models.cellInstance(type, it) } }
         fbo.begin()
         Gdx.gl.glClearColor(0f, 0f, 0f, 0f)
         Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT or GL20.GL_DEPTH_BUFFER_BIT)

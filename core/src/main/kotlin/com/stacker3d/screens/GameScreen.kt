@@ -153,7 +153,7 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
             }
             PieceType.Kind.X -> {
                 popups += Popup("X BLOCK!", DANGER, 1.8f)
-                popups += Popup("DROP IT OFF THE EDGE", Color.WHITE, 1.8f)
+                popups += Popup("HANG THE X OFF THE EDGE", Color.WHITE, 1.8f)
             }
             PieceType.Kind.HEART -> {
                 popups += Popup("HEART BLOCK!", HEART_PINK, 1.8f)
@@ -180,7 +180,7 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
             popups += Popup("PERFECT!", ACCENT)
             a.play(a.sPerfect, 0.5f)
         }
-        if (result.lost.isNotEmpty() && !result.dodged) a.play(a.sFall, 0.8f)
+        if (result.lost.isNotEmpty()) a.play(a.sFall, 0.8f)
     }
 
     override fun onHeartLost(heartsLeft: Int) {

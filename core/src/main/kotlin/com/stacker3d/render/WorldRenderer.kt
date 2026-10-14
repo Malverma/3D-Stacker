@@ -23,6 +23,7 @@ import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sign
 import kotlin.math.tan
 
@@ -151,26 +152,32 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
     fun onLanded(result: LandingResult) {
         pending?.let { resolvePending(it) }
         val offsetY = max(0f, visual.y - result.origin.y)
-        when {
-            result.type.kind == PieceType.Kind.BOMB || result.xHit -> {
-                val impact = result.impact!!
-                val instance = models.instance(result.type)
-                pending = Pending(result, instance, max(impact.y.toFloat(), result.origin.y + offsetY))
-            }
-            else -> {
-                val group = ++groupCounter
-                for (p in result.placed) addCube(p.to.x, p.to.z, result.type, p.from.y + offsetY, group)
-                if (result.placed.isNotEmpty() && result.placed.none { it.from.y + offsetY > it.to.y + 0.001f }) {
-                    impactedGroups += group
-                    onImpact?.invoke()
-                }
-                for (c in result.lost) {
-                    val pos = Vector3(c.x - 1f, c.y + offsetY + 0.5f, c.z - 1f)
-                    val out = tmp.set(pos.x, 0f, pos.z).nor()
-                    addDebris(models.instance(result.type), pos, Vector3(out.x * 3f, 2.5f, out.z * 3f), 1f)
-                }
-            }
+        if (result.type.kind == PieceType.Kind.BOMB) {
+            val impact = result.impact!!
+            pending = Pending(result, models.instance(result.type), max(impact.y.toFloat(), result.origin.y + offsetY))
+            return
         }
+        val cubeType = result.type.stackType
+        val group = ++groupCounter
+        for (p in result.placed) addCube(p.to.x, p.to.z, cubeType, p.from.y + offsetY, group)
+        if (result.placed.isNotEmpty() && result.placed.none { it.from.y + offsetY > it.to.y + 0.001f }) {
+            impactedGroups += group
+            onImpact?.invoke()
+        }
+        for (c in result.lost) fallOff(models.instance(cubeType), c.x, c.y + offsetY, c.z)
+        val x = result.xCell
+        if (result.xHit && x != null) {
+            pending = Pending(result, ModelInstance(models.xBlock), max(result.impact!!.y.toFloat(), x.y + offsetY))
+        } else if (result.dodged && x != null) {
+            fallOff(ModelInstance(models.xBlock), x.x, x.y + offsetY, x.z)
+        }
+    }
+
+    /** A cube that missed the board tumbles away outward. */
+    private fun fallOff(instance: ModelInstance, x: Int, y: Float, z: Int) {
+        val pos = Vector3(x - 1f, y + 0.5f, z - 1f)
+        val out = tmp.set(pos.x, 0f, pos.z).nor()
+        addDebris(instance, pos, Vector3(out.x * 3f, 2.5f, out.z * 3f), 1f)
     }
 
     private fun resolvePending(p: Pending) {
@@ -200,10 +207,10 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
             shake(1f)
             onExplode?.invoke()
         } else {
-            // X block shatters into small shards.
+            // The X cube shatters into small shards.
             repeat(8) {
                 val dir = tmp.set(MathUtils.random(-1f, 1f), MathUtils.random(0.6f, 1.4f), MathUtils.random(-1f, 1f)).nor()
-                addDebris(models.instance(result.type), center.cpy(), Vector3(dir.x * 5f, dir.y * 7f, dir.z * 5f), 0.32f)
+                addDebris(ModelInstance(models.xBlock), center.cpy(), Vector3(dir.x * 5f, dir.y * 7f, dir.z * 5f), 0.32f)
             }
             flashes += Flash(ModelInstance(models.ghost), center, Color(1f, 0.15f, 0.2f, 1f))
             onImpact?.invoke()
@@ -332,22 +339,25 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         pending?.let { batch.render(it.instance, env) }
 
         if (piece != null) {
-            val model = models.modelFor(piece.type)
-            for (c in piece.cells) {
-                val inst = pooled(model)
-                if (piece.type.kind == PieceType.Kind.NORMAL) inst.diffuse().set(models.colorOf(piece.type))
+            val type = piece.type
+            for ((i, c) in piece.cells.withIndex()) {
+                val inst = pooled(models.cellModel(type, i))
+                if (!type.isX(i) && type.stackType.kind == PieceType.Kind.NORMAL) inst.diffuse().set(models.colorOf(type.stackType))
                 inst.transform.setToTranslation(visual.x + c.x - 1f, visual.y + c.y + 0.5f, visual.z + c.z - 1f)
                 batch.render(inst, env)
             }
         }
         if (ghost != null) {
-            val bad = piece?.type?.kind == PieceType.Kind.X
             for ((i, c) in ghost.cells.withIndex()) {
+                // Fade the shadow out as the falling piece reaches it; overlapping surfaces would flicker.
+                val fade = ghostFade(piece, c.x, c.y, c.z)
+                if (fade <= 0f) continue
                 val inst = pooled(models.ghost)
-                if (ghost.onBoard[i] && !bad) {
-                    inst.diffuse().set(1f, 1f, 1f, 1f); inst.blending().opacity = 0.38f
+                // The X cube's shadow is always red: it must not land on the board.
+                if (ghost.onBoard[i] && piece?.type?.isX(i) != true) {
+                    inst.diffuse().set(1f, 1f, 1f, 1f); inst.blending().opacity = 0.38f * fade
                 } else {
-                    inst.diffuse().set(1f, 0.2f, 0.25f, 1f); inst.blending().opacity = 0.55f
+                    inst.diffuse().set(1f, 0.2f, 0.25f, 1f); inst.blending().opacity = 0.55f * fade
                 }
                 inst.transform.setToTranslation(c.x - 1f, c.y + 0.5f, c.z - 1f)
                 batch.render(inst, env)
@@ -356,6 +366,20 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         if (heights != null) renderWarnings(heights)
         for (f in flashes) batch.render(f.instance, env)
         batch.end()
+    }
+
+    /**
+     * 1 when no falling cube is near this ghost cell, dropping to 0 once one overlaps it.
+     * Distance is per-axis (cubes are boxes), measured from the smoothed on-screen position.
+     */
+    private fun ghostFade(piece: Piece?, x: Int, y: Int, z: Int): Float {
+        if (piece == null) return 1f
+        var nearest = Float.MAX_VALUE
+        for (c in piece.cells) {
+            val d = max(abs(visual.x + c.x - x), max(abs(visual.y + c.y - y), abs(visual.z + c.z - z)))
+            nearest = min(nearest, d)
+        }
+        return MathUtils.clamp((nearest - CUBE_SIZE) / GHOST_FADE_DISTANCE, 0f, 1f)
     }
 
     private fun renderWarnings(heights: IntArray) {
@@ -395,5 +419,7 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         const val MIN_VISIBLE_HALF_HEIGHT = 6.5f
         const val GRAVITY = 40f
         const val FLASH_TIME = 0.4f
+        /** How far (in cells) above its shadow a falling cube starts fading that shadow out. */
+        const val GHOST_FADE_DISTANCE = 0.6f
     }
 }

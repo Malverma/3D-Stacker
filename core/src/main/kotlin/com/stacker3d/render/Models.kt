@@ -100,6 +100,12 @@ class Models : Disposable {
         if (type.kind == PieceType.Kind.NORMAL) it.diffuse().set(colorOf(type))
     }
 
+    /** Model for cell [i] of a falling piece: X pieces have one X cube, the rest look like their base shape. */
+    fun cellModel(type: PieceType, i: Int): Model = if (type.isX(i)) xBlock else modelFor(type.stackType)
+
+    fun cellInstance(type: PieceType, i: Int): ModelInstance =
+        if (type.isX(i)) ModelInstance(xBlock) else instance(type.stackType)
+
     override fun dispose() {
         listOf(cube, bomb, xBlock, heartBlock, ghost, pillar, board).forEach { it.dispose() }
         textures.forEach { it.dispose() }

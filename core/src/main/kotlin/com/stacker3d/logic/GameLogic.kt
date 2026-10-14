@@ -17,22 +17,32 @@ data class LandingResult(
     val lost: List<Vec3i>,
     val perfect: Boolean,
     val points: Int,
-    /** Bomb: blast center. X block: the cell it hit. */
+    /** Bomb: blast center. X piece: where the X cube shatters on the board. */
     val impact: Vec3i? = null,
     /** Bomb: cubes destroyed by the blast (old positions). */
     val cleared: List<Pair<Vec3i, PieceType>> = emptyList(),
     /** Bomb: surviving cubes that dropped to fill the hole. */
     val shifted: List<PlacedCube> = emptyList(),
-    /** X block landed on the board. */
+    /** X piece: the X cube's cell when the piece landed. */
+    val xCell: Vec3i? = null,
+    /** X cube landed on the board. */
     val xHit: Boolean = false,
-    /** X block was steered off the board. */
+    /** X cube hung off the edge and fell away safely. */
     val dodged: Boolean = false,
     /** Heart block landed on the board and restored a heart. */
     val healed: Boolean = false,
 )
 
 /** Where each cube of a piece would end up if dropped now. */
-data class DropPreview(val cells: List<Vec3i>, val onBoard: List<Boolean>, val lostCount: Int, val heightsAfter: IntArray)
+data class DropPreview(
+    val cells: List<Vec3i>,
+    val onBoard: List<Boolean>,
+    /** Plain cubes that would fall off the board. */
+    val lostCount: Int,
+    val heightsAfter: IntArray,
+    /** X piece: the X cube would land on the board. */
+    val xOnBoard: Boolean = false,
+)
 
 enum class GameOverReason { HEARTS, GAPS }
 
@@ -76,8 +86,9 @@ class GameLogic(
     private var fallTimer = 0f
     private var spawnTimer = 0f
 
+    /** Seconds per layer. Shrinks smoothly as the score climbs (spec §8). */
     val fallInterval: Float
-        get() = max(MIN_FALL_INTERVAL, START_FALL_INTERVAL * SPEEDUP.pow(towerHeight / SPEEDUP_EVERY_LAYERS))
+        get() = max(MIN_FALL_INTERVAL, START_FALL_INTERVAL * SPEEDUP.pow(score / SPEEDUP_EVERY_POINTS))
 
     /** How far the lowest column trails the tallest one. */
     val gap: Int get() = board.maxHeight() - board.minHeight()
@@ -116,7 +127,7 @@ class GameLogic(
 
     fun move(dx: Int, dz: Int): Boolean {
         val p = current ?: return false
-        if (!fits(p.cells, p.x + dx, p.y, p.z + dz, p.type)) return false
+        if (!fits(p.cells, p.x + dx, p.y, p.z + dz)) return false
         p.x += dx
         p.z += dz
         return true
@@ -128,33 +139,23 @@ class GameLogic(
 
     fun hardDrop() {
         val p = current ?: return
-        if (isOffBoard(p)) {
-            land()
-            return
-        }
         p.y = landingY(p.cells, p.x, p.z)
         land()
     }
 
     // ---- queries --------------------------------------------------------------------------
 
-    /**
-     * True if the cells can occupy this spot: no on-board cube inside a column, and at least one cube over
-     * the board. The X block is the exception: it may hang fully off the board, one ring of cells out.
-     */
-    fun fits(cells: List<Vec3i>, x: Int, y: Int, z: Int, type: PieceType? = null): Boolean {
+    /** True if the cells can occupy this spot: at least one cube over the board and none inside a column. */
+    fun fits(cells: List<Vec3i>, x: Int, y: Int, z: Int): Boolean {
         var anyOnBoard = false
         for (c in cells) {
             val wx = c.x + x
             val wz = c.z + z
-            if (!board.inside(wx, wz)) {
-                if (type?.kind == PieceType.Kind.X && (wx !in -1..Board.SIZE || wz !in -1..Board.SIZE)) return false
-                continue
-            }
+            if (!board.inside(wx, wz)) continue
             anyOnBoard = true
             if (c.y + y < board.height(wx, wz)) return false
         }
-        return anyOnBoard || type?.kind == PieceType.Kind.X
+        return anyOnBoard
     }
 
     /** The origin y at which these cells would come to rest if dropped at (x, z). */
@@ -169,18 +170,24 @@ class GameLogic(
     }
 
     /** Simulates a drop of [cells] at (x, z) without changing the board. Null if no cube is over the board. */
-    fun previewDrop(cells: List<Vec3i>, x: Int, z: Int): DropPreview? {
+    fun previewDrop(cells: List<Vec3i>, x: Int, z: Int, xIndex: Int = -1): DropPreview? {
         if (cells.none { board.inside(it.x + x, it.z + z) }) return null
         val y = landingY(cells, x, z)
         val heights = board.heights()
         val out = MutableList(cells.size) { Vec3i(0, 0, 0) }
         val onBoard = MutableList(cells.size) { false }
         var lost = 0
+        var xOnBoard = false
         cells.indices.sortedBy { cells[it].y }.forEach { i ->
             val c = cells[i]
             val wx = c.x + x
             val wz = c.z + z
-            if (board.inside(wx, wz)) {
+            if (i == xIndex) {
+                // The X cube never joins the tower: show it where it lands.
+                xOnBoard = board.inside(wx, wz)
+                out[i] = Vec3i(wx, c.y + y, wz)
+                onBoard[i] = xOnBoard
+            } else if (board.inside(wx, wz)) {
                 val col = wx + wz * Board.SIZE
                 out[i] = Vec3i(wx, heights[col], wz)
                 heights[col]++
@@ -190,14 +197,12 @@ class GameLogic(
                 lost++
             }
         }
-        return DropPreview(out, onBoard, lost, heights)
+        return DropPreview(out, onBoard, lost, heights, xOnBoard)
     }
 
-    fun ghost(): DropPreview? = current?.let { previewDrop(it.cells, it.x, it.z) }
+    fun ghost(): DropPreview? = current?.let { previewDrop(it.cells, it.x, it.z, it.type.xIndex) }
 
     // ---- internals ------------------------------------------------------------------------
-
-    private fun isOffBoard(p: Piece) = p.worldCells().none { board.inside(it.x, it.z) }
 
     private fun spawn() {
         val type = next
@@ -221,20 +226,14 @@ class GameLogic(
             if (random.nextFloat() < heartBlockChance) return PieceType.HEART
             val r = random.nextFloat()
             if (r < BOMB_CHANCE) return PieceType.BOMB
-            if (r < BOMB_CHANCE + X_CHANCE) return PieceType.X_BLOCK
+            if (r < BOMB_CHANCE + X_CHANCE) return PieceType.xPieces.random(random)
         }
         return bag.next()
     }
 
     private fun stepDown() {
         val p = current ?: return
-        if (isOffBoard(p)) {
-            // A dodged X block falls past the tower top, then it's gone.
-            p.y--
-            if (p.y < towerHeight - 1) land()
-            return
-        }
-        if (fits(p.cells, p.x, p.y - 1, p.z, p.type)) p.y-- else land()
+        if (fits(p.cells, p.x, p.y - 1, p.z)) p.y-- else land()
     }
 
     private val kicks = listOf(
@@ -251,7 +250,7 @@ class GameLogic(
         val baseX = (cx - (Orientation.extent(newCells) { it.x } - 1) / 2f).roundToInt()
         val baseZ = (cz - (Orientation.extent(newCells) { it.z } - 1) / 2f).roundToInt()
         for (k in kicks) {
-            if (fits(newCells, baseX + k.x, p.y + k.y, baseZ + k.z, p.type)) {
+            if (fits(newCells, baseX + k.x, p.y + k.y, baseZ + k.z)) {
                 p.cells = newCells
                 p.x = baseX + k.x
                 p.y += k.y
@@ -270,7 +269,7 @@ class GameLogic(
         val origin = Vec3i(p.x, p.y, p.z)
         val result = when (p.type.kind) {
             PieceType.Kind.BOMB -> explode(p, origin)
-            PieceType.Kind.X -> resolveX(p, origin)
+            PieceType.Kind.X -> placeX(p, origin)
             PieceType.Kind.NORMAL -> place(p, origin)
             PieceType.Kind.HEART -> place(p, origin).let {
                 if (it.placed.isNotEmpty() && hearts < MAX_HEARTS) it.copy(healed = true) else it
@@ -284,7 +283,8 @@ class GameLogic(
             listener.onHeartGained(hearts)
         }
 
-        val costsHeart = result.xHit || (p.type.kind == PieceType.Kind.NORMAL && result.lost.isNotEmpty())
+        val costsHeart = result.xHit ||
+            (p.type.kind in listOf(PieceType.Kind.NORMAL, PieceType.Kind.X) && result.lost.isNotEmpty())
         if (costsHeart && !immortal) {
             hearts--
             listener.onHeartLost(hearts)
@@ -317,9 +317,12 @@ class GameLogic(
     private fun place(p: Piece, origin: Vec3i): LandingResult {
         val placed = ArrayList<PlacedCube>()
         val lost = ArrayList<Vec3i>()
-        for (c in p.worldCells().sortedBy { it.y }) {
+        val world = p.worldCells()
+        for (i in world.indices.sortedBy { world[it].y }) {
+            if (p.type.isX(i)) continue
+            val c = world[i]
             if (board.inside(c.x, c.z)) {
-                val y = board.push(c.x, c.z, p.type)
+                val y = board.push(c.x, c.z, p.type.stackType)
                 placed += PlacedCube(c, Vec3i(c.x, y, c.z))
             } else {
                 lost += c
@@ -360,13 +363,15 @@ class GameLogic(
         return LandingResult(p.type, origin, emptyList(), emptyList(), false, points, center, cleared, shifted)
     }
 
-    private fun resolveX(p: Piece, origin: Vec3i): LandingResult {
-        val cell = p.worldCells().first()
-        if (!board.inside(cell.x, cell.z)) {
-            return LandingResult(p.type, origin, emptyList(), listOf(cell), false, DODGE_BONUS, dodged = true)
+    /** Plain cubes stack as usual; the X cube shatters on the board (costing a heart) or falls away if it hangs off. */
+    private fun placeX(p: Piece, origin: Vec3i): LandingResult {
+        val base = place(p, origin)
+        val cell = p.worldCells()[p.type.xIndex]
+        return if (board.inside(cell.x, cell.z)) {
+            base.copy(perfect = false, xCell = cell, xHit = true, impact = Vec3i(cell.x, board.height(cell.x, cell.z), cell.z))
+        } else {
+            base.copy(xCell = cell, dodged = true, points = base.points + DODGE_BONUS)
         }
-        val hit = Vec3i(cell.x, board.height(cell.x, cell.z), cell.z)
-        return LandingResult(p.type, origin, emptyList(), emptyList(), false, 0, impact = hit, xHit = true)
     }
 
     /** Debug/tests: swaps the falling piece for a fresh one of [type]. */
@@ -377,7 +382,9 @@ class GameLogic(
     /** Debug/autoplay: re-orient and reposition the current piece without collision kicks. */
     fun debugPlace(cells: List<Vec3i>, x: Int, z: Int): Boolean {
         val p = current ?: return false
-        if (!fits(cells, x, p.y, z, p.type)) return false
+        // X pieces locate their X cube by index, so their shape can't be swapped out.
+        if (p.type.kind == PieceType.Kind.X && cells.size != p.cells.size) return false
+        if (!fits(cells, x, p.y, z)) return false
         p.cells = cells
         p.x = x
         p.z = z
@@ -394,8 +401,9 @@ class GameLogic(
         const val SPAWN_DELAY = 0.3f
         const val START_FALL_INTERVAL = 1.0f
         const val MIN_FALL_INTERVAL = 0.25f
-        const val SPEEDUP = 0.93f
-        const val SPEEDUP_EVERY_LAYERS = 5
+        /** Fall interval is multiplied by this for every [SPEEDUP_EVERY_POINTS] points (applied continuously). */
+        const val SPEEDUP = 0.98f
+        const val SPEEDUP_EVERY_POINTS = 250f
         const val POINTS_PER_CUBE = 10
         const val POINTS_PER_NEW_LAYER = 50
         const val PERFECT_BONUS = 25
@@ -408,9 +416,9 @@ class GameLogic(
         const val GAP_WARNING = 7
 
         const val SPECIALS_AFTER = 4
-        const val BOMB_CHANCE = 0.07f
+        const val BOMB_CHANCE = 0.05f
         const val X_CHANCE = 0.08f
-        const val BLAST_DOWN = 2
+        const val BLAST_DOWN = 1
         const val BLAST_UP = 1
     }
 }

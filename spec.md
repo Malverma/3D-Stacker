@@ -96,12 +96,12 @@ All pieces are built from 1×1×1 cubes. MVP set:
 
 ### Special blocks
 
-Specials are single cubes with a printed face. They start appearing after the first 4 pieces and never come twice in a row. Each spawn has about a 7% chance of a Bomb and an 8% chance of an X Block. A short banner explains each one when it appears.
+Specials start appearing after the first 4 pieces and never come twice in a row. Each spawn has a 5% chance of a Bomb and an 8% chance of an X piece. A short banner explains each one when it appears.
 
 | Block | Look | Effect |
 |---|---|---|
-| **Bomb** | Black cube with a lit bomb | When it lands, it explodes. It destroys every cube within one cell sideways of where it landed, from 2 layers below it to 1 layer above it. Cubes above the blast drop down to fill the hole. **Never costs a heart.** +15 points per cube destroyed. |
-| **X Block** | Red cube with a white X | If it lands on the board, you **lose a heart** and it shatters (nothing is added to the tower). Unlike other pieces, it can be moved fully off the board, one cell past the edge. Dropping it there is safe and scores +25 ("DODGED!"). Its landing shadow is always red. |
+| **Bomb** | Black cube with a lit bomb | When it lands, it explodes. It destroys every cube within one cell sideways of where it landed, from 1 layer below it to 1 layer above it. Cubes above the blast drop down to fill the hole. **Never costs a heart.** +15 points per cube destroyed. |
+| **X piece** | A 1×2 domino or 1×3 bar with a red X cube on one end | The plain cubes stack like a normal piece. The X cube never joins the tower. If it lands on the board, you **lose a heart** and it shatters. If it hangs off the edge, it falls away safely and scores +25 ("DODGED!"). So you have to rotate and slide the piece until the plain cubes are on the board and the X end is off. Like any piece, at least one cube must stay over the board. A piece costs at most 1 heart, even if the X lands on the board and plain cubes also spill. The X cube's landing shadow is always red. |
 
 - Pieces are drawn with a **shuffled-bag randomizer**: every piece type appears once per bag, in random order. This prevents long streaks of the same piece.
 - A **"Next" preview** in the HUD shows the upcoming piece.
@@ -144,8 +144,7 @@ Specials are single cubes with a printed face. They start appearing after the fi
 - The **High Score** and **Best Height** are saved on the device and shown on the main menu and Game Over screen.
 
 ### Difficulty curve
-- Fall speed starts at **1 layer per 1.0 s**.
-- Every 5 layers of tower height, the fall interval shrinks by 7%, down to a floor of **0.25 s**.
+- Fall speed starts at **1 layer per 1.0 s** and **speeds up smoothly as the score rises**. The fall interval is multiplied by 0.98 for every 250 points, applied continuously, down to a floor of **0.25 s**. That works out to about 0.85 s at 2,000 points, 0.67 s at 5,000 and 0.45 s at 10,000. Score never goes down, so bombs can't slow the game back down.
 - Larger pieces (Square, Tee) appear more often as height increases. This is optional tuning.
 
 ### Hearts
@@ -153,7 +152,7 @@ Specials are single cubes with a printed face. They start appearing after the fi
 - Hearts are **never regained** during a run. There is no way to earn hearts back.
 - Lose 1 heart for each piece that drops at least one cube off the board.
 - When a heart is lost: screen shake, the heart icon breaks, and a sound plays.
-- An X Block landing on the board also costs 1 heart. Bombs never cost hearts.
+- An X cube landing on the board also costs 1 heart. Bombs never cost hearts.
 - At 0 hearts: **Game Over** ("OUT OF HEARTS"). The gap rule (§4) can also end the game.
 
 ---
@@ -181,7 +180,7 @@ The SHOP button is on the main menu, under Play and Settings. It has three tabs:
 | **Specials** | **Heart Block** | 250 coins |
 
 - Buying a background or block set equips it right away. Owned items can be re-equipped at any time, and only one of each kind is active.
-- The bomb, X block and heart block always keep their printed faces, whatever block colors are equipped.
+- Bomb, X and heart cubes always keep their printed faces, whatever block colors are equipped.
 - **Heart Block:** once unlocked, each spawn has a **1% chance** of being a Heart Block (a pink 1×1 cube with a heart). It stacks like a normal cube and stays in the tower. When it lands on the board it **restores 1 heart**, unless you already have 3. If it falls off the board, nothing happens.
 
 ## 9. Screens & UI
@@ -246,6 +245,6 @@ The tower is unbounded, so cubes far below the camera's view (e.g. more than 30 
 - Hearts are never regained (§8).
 - Cubes settle onto the cube below after landing, so the tower never has gaps (§4).
 - Pieces **can stand upright**, using the tip gesture or button (§5).
-- Special blocks: the Bomb and the X Block (§6).
+- Special blocks: the Bomb and the X piece (§6). X pieces are a domino or bar with an X cube on one end.
 - Gap rule: lose if any cell trails the tallest column by more than 10 levels (§4).
 - Engine: libGDX with Kotlin (§11).

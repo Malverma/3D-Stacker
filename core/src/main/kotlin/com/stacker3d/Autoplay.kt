@@ -37,7 +37,6 @@ class Autoplay(
     private fun plan() {
         val piece = logic.current ?: return
         when (piece.type.kind) {
-            PieceType.Kind.X -> if (!chaos) { logic.debugPlace(piece.cells, -1, 1); return }
             PieceType.Kind.BOMB -> if (!chaos) {
                 // Blow up the tallest column to keep the tower level.
                 val h = logic.board.heights()
@@ -45,14 +44,15 @@ class Autoplay(
                 logic.debugPlace(piece.cells, col % 3, col / 3)
                 return
             }
-            PieceType.Kind.NORMAL, PieceType.Kind.HEART -> Unit
+            PieceType.Kind.NORMAL, PieceType.Kind.HEART, PieceType.Kind.X -> Unit
         }
+        // Keyed by cell order, which matters for X pieces (the X cube is a fixed index).
         val orientations = LinkedHashSet<List<Vec3i>>()
         var yawed = piece.cells
         repeat(4) {
             var tipped = yawed
             repeat(3) {
-                orientations += tipped.sortedWith(compareBy({ it.x }, { it.y }, { it.z }))
+                orientations += tipped
                 tipped = Orientation.tip(tipped)
             }
             yawed = Orientation.yaw(yawed)
@@ -61,8 +61,8 @@ class Autoplay(
         var bestScore = Float.MAX_VALUE
         for (cells in orientations) for (x in -2..3) for (z in -2..3) {
             if (!logic.fits(cells, x, piece.y, z)) continue
-            val r = logic.previewDrop(cells, x, z) ?: continue
-            val score = if (chaos) random.nextFloat() else r.lostCount * 1000f +
+            val r = logic.previewDrop(cells, x, z, piece.type.xIndex) ?: continue
+            val score = if (chaos) random.nextFloat() else (r.lostCount + if (r.xOnBoard) 1 else 0) * 1000f +
                 (r.heightsAfter.max() - r.heightsAfter.min()) * 4f + r.heightsAfter.max() + random.nextFloat()
             if (score < bestScore) {
                 bestScore = score
