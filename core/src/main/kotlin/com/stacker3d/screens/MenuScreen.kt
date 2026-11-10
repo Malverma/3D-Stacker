@@ -39,7 +39,7 @@ class MenuScreen(private val game: StackerGame) : ScreenAdapter() {
     /** Rebuilds the backdrop tower so it shows the currently equipped sky and block colors. */
     private fun buildBackdrop() {
         world.theme = Catalog.sky(game.settings.skyId)
-        a.models.skin = Catalog.skin(game.settings.skinId)
+        a.models.skin = Catalog.skin(game.debug.skinId ?: game.settings.skinId)
         world.lift = 1.4f
         world.reset()
         world.orbitSpeed = 9f

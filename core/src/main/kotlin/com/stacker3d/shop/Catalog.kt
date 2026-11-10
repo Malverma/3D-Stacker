@@ -1,17 +1,98 @@
 package com.stacker3d.shop
 
+import com.stacker3d.logic.PieceType
+
 /** A background color scheme: gradient keys by tower height, plus when stars fade in. */
 class SkyTheme(val id: String, val name: String, val keys: List<SkyKey>, val starsFrom: Float)
 
 /** Sky gradient at a tower height, colors as 0xRRGGBB. */
 class SkyKey(val height: Float, val top: Int, val bottom: Int)
 
+/** Board colors under the tower, as 0xRRGGBB: the 3x3 [tiles], the [base] slab, and the raised [rim] around it. */
+class BoardStyle(val tiles: Int, val base: Int, val rim: Int)
+
 /** Block look: [rgb] paints every plain block one color; null keeps the per-piece colors. */
-class BlockSkin(val id: String, val name: String, val rgb: Int?)
+class BlockSkin(
+    val id: String,
+    val name: String,
+    val rgb: Int?,
+    val price: Int = 100,
+    val description: String = "",
+    /** Below 1, plain blocks are see-through and glossy. */
+    val opacity: Float = 1f,
+    /** Looks each plain block picks from (needs [rgb]); empty means plain colored cubes. */
+    val styles: List<BlockStyle> = emptyList(),
+    /** 0..1: how much each plain block's shade varies from the next. */
+    val variety: Float = 0f,
+    /** Tower cubes squash and wobble when something lands on or near them. */
+    val jiggly: Boolean = false,
+    /** Wobble speed (radians/s) and how fast it dies down: lower is gooier. */
+    val wobbleFreq: Float = 26f,
+    val wobbleDamp: Float = 5f,
+    /**
+     * Blocks sag, grow drips down over the block below once they land, and stick to their neighbors, slowly
+     * spreading wider under the weight of the blocks above.
+     */
+    val melts: Boolean = false,
+    /** Sound file (sfx/<name>.wav) played on landing instead of the usual thud. */
+    val landSound: String? = null,
+    val landPitch: Float = 1f,
+    /** The board the tower starts on. */
+    val board: BoardStyle = BoardStyle(0xE9F4FF, 0x1B2A4A, 0xFFD23F),
+)
+
+/** A look for one plain block of a fancy skin; a skin mixes several. */
+enum class BlockStyle {
+    /** A few small white bubbles. */
+    BUBBLY,
+    /** Extra see-through, nearly bubble-free. */
+    CLEAR,
+    /** A darker blob suspended inside. */
+    CORE,
+    /** Milky white swirls. */
+    CLOUDY,
+    /** Marbled with white and a deeper shade. */
+    SWIRL,
+    /** A deeper, more saturated shade with a few specks. */
+    HOT,
+}
 
 enum class ShopTab(val title: String) { BACKGROUNDS("BACKGROUNDS"), BLOCKS("BLOCKS"), SPECIALS("SPECIALS") }
 
-class ShopItem(val id: String, val tab: ShopTab, val name: String, val price: Int, val description: String = "") {
+/**
+ * A special block sold in the shop. Buying it unlocks level 1; each upgrade adds [chancePerLevel] to its spawn
+ * chance, up to [MAX_LEVEL].
+ */
+class SpecialBlock(
+    val type: PieceType,
+    val id: String,
+    val name: String,
+    /** Short effect line for the shop row. */
+    val effect: String,
+    val price: Int,
+    val baseChance: Float,
+    val chancePerLevel: Float,
+    /** Face shown in the shop row. */
+    val texture: String,
+) {
+    fun chance(level: Int) = if (level <= 0) 0f else baseChance + (level.coerceAtMost(MAX_LEVEL) - 1) * chancePerLevel
+
+    /** Coins to go from [level] to the next one. */
+    fun upgradeCost(level: Int) = price * level / 2
+
+    companion object {
+        const val MAX_LEVEL = 5
+    }
+}
+
+class ShopItem(
+    val id: String,
+    val tab: ShopTab,
+    val name: String,
+    val price: Int,
+    val description: String = "",
+    val special: SpecialBlock? = null,
+) {
     /** Backgrounds and block skins are equipped one at a time; specials are simply unlocked. */
     val equippable get() = tab != ShopTab.SPECIALS
 }
@@ -47,21 +128,50 @@ object Catalog {
     val skies = listOf(classicSky, neonSky)
 
     val skins = listOf(
-        BlockSkin("skin_classic", "CLASSIC MIX", null),
-        BlockSkin("skin_ruby", "ALL RUBY", 0xE63946),
-        BlockSkin("skin_gold", "ALL GOLD", 0xFFC93C),
-        BlockSkin("skin_mint", "ALL MINT", 0x3DDC97),
-        BlockSkin("skin_ocean", "ALL OCEAN", 0x2F80ED),
-        BlockSkin("skin_grape", "ALL GRAPE", 0x9B5DE5),
-        BlockSkin("skin_snow", "ALL SNOW", 0xEEF3F8),
+        BlockSkin("skin_classic", "CLASSIC MIX", null, price = 0),
+        BlockSkin("skin_ruby", "RUBY", 0xE63946, board = BoardStyle(0xF7DADD, 0x3D0A12, 0xE63946)),
+        BlockSkin("skin_gold", "GOLD", 0xFFC93C, board = BoardStyle(0xFFF6D6, 0x3B2A0A, 0xD4A017)),
+        BlockSkin("skin_mint", "MINT", 0x3DDC97, board = BoardStyle(0xE2FAEE, 0x0D3B2C, 0x3DDC97)),
+        BlockSkin("skin_ocean", "OCEAN", 0x2F80ED, board = BoardStyle(0xDCEBFF, 0x0A1F44, 0x56CCF2)),
+        BlockSkin("skin_grape", "GRAPE", 0x9B5DE5, board = BoardStyle(0xEFE3FC, 0x2A1145, 0xC77DFF)),
+        BlockSkin("skin_snow", "SNOW", 0xEEF3F8, board = BoardStyle(0xB9D3E6, 0x2C3E50, 0xFFFFFF)),
+        BlockSkin(
+            "skin_slime", "SLIME", 0x3CC43A, price = 300, description = "JIGGLES WHEN HIT",
+            board = BoardStyle(0xD9F7C8, 0x16341A, 0x8CFF5A),
+            opacity = 0.8f, variety = 0.45f, jiggly = true, landSound = "squelch",
+            styles = listOf(BlockStyle.BUBBLY, BlockStyle.CLEAR, BlockStyle.CORE, BlockStyle.CLOUDY),
+        ),
+        BlockSkin(
+            "skin_gum", "BUBBLE GUM", 0xFF7EB9, price = 300, description = "GOOEY, SAGS AND DRIPS",
+            board = BoardStyle(0xFFE3F0, 0x5C1238, 0xFF4FA3),
+            variety = 0.4f, jiggly = true, wobbleFreq = 17f, wobbleDamp = 3.2f, melts = true,
+            styles = listOf(BlockStyle.BUBBLY, BlockStyle.SWIRL, BlockStyle.HOT),
+            landSound = "squelch", landPitch = 0.8f,
+        ),
     )
 
-    const val HEART_BLOCK_ID = "special_heart"
+    /**
+     * Spawn chances are per piece. Hearts stay scarce (X pieces alone are 8%) so losing one still matters:
+     * about one heal per run at level 1, two or three fully upgraded. All five together top out near 12%.
+     */
+    val specials = listOf(
+        SpecialBlock(PieceType.HEART, "special_heart", "HEART BLOCK", "+1 HEART", 250, 0.004f, 0.0015f, "textures/cube_heart.png"),
+        SpecialBlock(PieceType.GOLD, "special_gold", "GOLDEN BLOCK", "+2 COINS", 150, 0.02f, 0.005f, "textures/cube_gold.png"),
+        SpecialBlock(
+            PieceType.MULTIPLIER, "special_multiplier", "MULTIPLIER BLOCK", "+0.1x SCORE", 300, 0.01f, 0.0025f,
+            "textures/cube_multiplier.png",
+        ),
+        SpecialBlock(
+            PieceType.CRACKED, "special_cracked", "CRACKED BLOCK", "+40 PTS, CRUMBLES", 100, 0.02f, 0.005f,
+            "textures/cube_cracked.png",
+        ),
+        SpecialBlock(PieceType.MYSTERY, "special_mystery", "MYSTERY BLOCK", "ANY EFFECT", 500, 0.003f, 0.001f, "textures/cube_mystery.png"),
+    )
 
     val items: List<ShopItem> =
         skies.map { ShopItem(it.id, ShopTab.BACKGROUNDS, it.name, if (it === classicSky) 0 else 100) } +
-            skins.map { ShopItem(it.id, ShopTab.BLOCKS, it.name, if (it.rgb == null) 0 else 100) } +
-            ShopItem(HEART_BLOCK_ID, ShopTab.SPECIALS, "HEART BLOCK", 250, "+1 HEART · 1% SPAWN")
+            skins.map { ShopItem(it.id, ShopTab.BLOCKS, it.name, it.price, it.description) } +
+            specials.map { ShopItem(it.id, ShopTab.SPECIALS, it.name, it.price, special = it) }
 
     fun sky(id: String) = skies.firstOrNull { it.id == id } ?: classicSky
 

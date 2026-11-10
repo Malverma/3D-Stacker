@@ -44,7 +44,7 @@ class Autoplay(
                 logic.debugPlace(piece.cells, col % 3, col / 3)
                 return
             }
-            PieceType.Kind.NORMAL, PieceType.Kind.HEART, PieceType.Kind.X -> Unit
+            else -> Unit
         }
         // Keyed by cell order, which matters for X pieces (the X cube is a fixed index).
         val orientations = LinkedHashSet<List<Vec3i>>()

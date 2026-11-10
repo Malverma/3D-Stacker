@@ -5,33 +5,59 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.random.Random
 
-/** A cube that locked into the tower: where it started ([from]) and where it settled ([to]). */
-data class PlacedCube(val from: Vec3i, val to: Vec3i)
+/** A cube that locked into the tower: where it started ([from]), where it settled ([to]) and what it is. */
+data class PlacedCube(val from: Vec3i, val to: Vec3i, val type: PieceType)
+
+/** A cube that missed the board and fell away. */
+data class LostCube(val at: Vec3i, val type: PieceType)
 
 data class LandingResult(
     val type: PieceType,
     /** Piece origin at the moment it landed. */
     val origin: Vec3i,
     val placed: List<PlacedCube>,
-    /** Cubes that left the board: off-board cubes, or a dodged X block. */
-    val lost: List<Vec3i>,
+    /** Plain or special cubes that missed the board. (A dodged X cube is reported by [dodged] instead.) */
+    val lost: List<LostCube>,
     val perfect: Boolean,
     val points: Int,
-    /** Bomb: blast center. X piece: where the X cube shatters on the board. */
+    /** Bomb: blast center. X cube or cursed Mystery cube: where it shatters on the board. */
     val impact: Vec3i? = null,
+    /** A bomb went off (a Bomb, or a Mystery cube that became one). */
+    val exploded: Boolean = false,
     /** Bomb: cubes destroyed by the blast (old positions). */
     val cleared: List<Pair<Vec3i, PieceType>> = emptyList(),
     /** Bomb: surviving cubes that dropped to fill the hole. */
     val shifted: List<PlacedCube> = emptyList(),
-    /** X piece: the X cube's cell when the piece landed. */
-    val xCell: Vec3i? = null,
+    /** The cube that sets off [exploded] or [xHit] (or was [dodged]): its cell when the piece landed. */
+    val effectCell: Vec3i? = null,
     /** X cube landed on the board. */
     val xHit: Boolean = false,
     /** X cube hung off the edge and fell away safely. */
     val dodged: Boolean = false,
     /** Heart block landed on the board and restored a heart. */
     val healed: Boolean = false,
+    /** Coins earned this landing (Golden Block), banked when the run ends. */
+    val coins: Int = 0,
+    /** Score multiplier gained this landing, in tenths (Multiplier Block). */
+    val multiplierGain: Int = 0,
+    /** Mystery cube: the effect it turned into. */
+    val mystery: MysteryEffect? = null,
+    /**
+     * Cracked cubes that crumbled after this landing, in the order they broke. Each one is removed from its column
+     * and every cube above it drops one layer before the next one breaks.
+     */
+    val crumbled: List<Vec3i> = emptyList(),
 )
+
+/** What a Mystery Block can turn into when it lands on the board. */
+enum class MysteryEffect(val label: String, val good: Boolean) {
+    GOLD_RUSH("GOLD RUSH", true),
+    HEAL("HEAL", true),
+    MULTIPLY("MULTIPLY", true),
+    BOMB("BOMB", true),
+    CRACK("CRACKED", false),
+    CURSE("CURSE", false),
+}
 
 /** Where each cube of a piece would end up if dropped now. */
 data class DropPreview(
@@ -69,7 +95,7 @@ class GameLogic(
     /** Highest the tower has been this run; new layers above it score points. */
     var peakHeight = 0; private set
     var current: Piece? = null; private set
-    var next: PieceType = bag.next(); private set
+    var next: PieceSpec = PieceSpec(bag.next()); private set
     var isGameOver = false; private set
     var gameOverReason: GameOverReason? = null; private set
     var landedCount = 0; private set
@@ -77,8 +103,15 @@ class GameLogic(
     /** Debug/autoplay only: hearts are never lost. */
     var immortal = false
 
-    /** Chance per spawn of a Heart Block; 0 until it's unlocked in the shop. */
-    var heartBlockChance = 0f
+    /** Chance per spawn of each shop special ([PieceType.unlockables]); missing types never spawn. */
+    var specialChances: Map<PieceType, Float> = emptyMap()
+
+    /** Score multiplier in tenths: 10 is ×1.0. Each Multiplier Block adds [MULTIPLIER_STEP]. */
+    var multiplierTenths = 10; private set
+    val multiplier: Float get() = multiplierTenths / 10f
+
+    /** Coins from Golden Blocks this run, paid out with the score coins when the run ends. */
+    var bonusCoins = 0; private set
 
     /** The one ad-revive per run has been used. */
     var revived = false; private set
@@ -100,6 +133,8 @@ class GameLogic(
         towerHeight = 0
         peakHeight = 0
         landedCount = 0
+        multiplierTenths = 10
+        bonusCoins = 0
         isGameOver = false
         gameOverReason = null
         revived = false
@@ -205,30 +240,39 @@ class GameLogic(
     // ---- internals ------------------------------------------------------------------------
 
     private fun spawn() {
-        val type = next
-        next = pickNext(type)
-        spawnAs(type)
+        val spec = next
+        next = pickNext(spec)
+        spawnAs(spec)
     }
 
-    private fun spawnAs(type: PieceType) {
-        val cells = type.cells
+    private fun spawnAs(spec: PieceSpec) {
+        val cells = spec.cells
         val x = (1f - (Orientation.extent(cells) { it.x } - 1) / 2f).roundToInt()
         val z = (1f - (Orientation.extent(cells) { it.z } - 1) / 2f).roundToInt()
-        val piece = Piece(type, cells, x, towerHeight + SPAWN_GAP, z)
+        val piece = Piece(spec, x, towerHeight + SPAWN_GAP, z)
         current = piece
         fallTimer = 0f
         listener.onSpawn(piece)
     }
 
     /** Specials show up after a short warm-up, never twice in a row. */
-    private fun pickNext(previous: PieceType): PieceType {
-        if (landedCount >= SPECIALS_AFTER && previous.kind == PieceType.Kind.NORMAL) {
-            if (random.nextFloat() < heartBlockChance) return PieceType.HEART
-            val r = random.nextFloat()
-            if (r < BOMB_CHANCE) return PieceType.BOMB
-            if (r < BOMB_CHANCE + X_CHANCE) return PieceType.xPieces.random(random)
+    private fun pickNext(previous: PieceSpec): PieceSpec {
+        if (landedCount >= SPECIALS_AFTER && !previous.isSpecial) {
+            // One roll shared by every special, so their chances simply add up.
+            var r = random.nextFloat()
+            for (type in PieceType.unlockables) {
+                val chance = specialChances[type] ?: continue
+                if (r < chance) {
+                    // Half the time the special cube comes attached to a regular piece from the bag.
+                    return if (random.nextFloat() < ATTACH_CHANCE) PieceSpec.attached(bag.next(), type, random) else PieceSpec(type)
+                }
+                r -= chance
+            }
+            if (r < BOMB_CHANCE) return PieceSpec(PieceType.BOMB)
+            r -= BOMB_CHANCE
+            if (r < X_CHANCE) return PieceSpec(PieceType.xPieces.random(random))
         }
-        return bag.next()
+        return PieceSpec(bag.next())
     }
 
     private fun stepDown() {
@@ -267,14 +311,15 @@ class GameLogic(
         spawnTimer = SPAWN_DELAY
         landedCount++
         val origin = Vec3i(p.x, p.y, p.z)
-        val result = when (p.type.kind) {
+        val base = when (p.type.kind) {
             PieceType.Kind.BOMB -> explode(p, origin)
             PieceType.Kind.X -> placeX(p, origin)
-            PieceType.Kind.NORMAL -> place(p, origin)
-            PieceType.Kind.HEART -> place(p, origin).let {
-                if (it.placed.isNotEmpty() && hearts < MAX_HEARTS) it.copy(healed = true) else it
-            }
+            else -> place(p, origin)
         }
+        // The multiplier applies to this landing's points before a Multiplier Block raises it.
+        val result = base.copy(points = base.points * multiplierTenths / 10, crumbled = crumble())
+        multiplierTenths += result.multiplierGain
+        bonusCoins += result.coins
         towerHeight = board.maxHeight()
         score += result.points
         listener.onLanded(result)
@@ -283,8 +328,9 @@ class GameLogic(
             listener.onHeartGained(hearts)
         }
 
-        val costsHeart = result.xHit ||
-            (p.type.kind in listOf(PieceType.Kind.NORMAL, PieceType.Kind.X) && result.lost.isNotEmpty())
+        // Regular pieces (with or without a special attached) and X pieces cost a heart when cubes spill.
+        val spills = p.type.kind == PieceType.Kind.NORMAL || p.type.kind == PieceType.Kind.X
+        val costsHeart = result.xHit || (spills && result.lost.isNotEmpty())
         if (costsHeart && !immortal) {
             hearts--
             listener.onHeartLost(hearts)
@@ -314,25 +360,91 @@ class GameLogic(
         listener.onGameOver(reason)
     }
 
+    /** Stacks the piece's plain cubes as [type]; [fuse] gives each cube's crack fuse (0 = not cracked). */
+    /**
+     * Stacks every cube except an X cube, each as its own block type, and applies the specials among them.
+     * A Mystery cube over the board first rolls its effect: it then stacks as the block it became, or (bomb, curse)
+     * acts where it landed once the rest has stacked.
+     */
     private fun place(p: Piece, origin: Vec3i): LandingResult {
-        val placed = ArrayList<PlacedCube>()
-        val lost = ArrayList<Vec3i>()
         val world = p.worldCells()
+        val mysteryIndex = world.indices.firstOrNull {
+            p.cellType(it).kind == PieceType.Kind.MYSTERY && board.inside(world[it].x, world[it].z)
+        } ?: -1
+        val effect = if (mysteryIndex >= 0) rollMystery() else null
+
+        val placed = ArrayList<PlacedCube>()
+        val lost = ArrayList<LostCube>()
+        var coins = 0
+        var gain = 0
+        var bonus = 0
+        var heart = false
         for (i in world.indices.sortedBy { world[it].y }) {
             if (p.type.isX(i)) continue
             val c = world[i]
-            if (board.inside(c.x, c.z)) {
-                val y = board.push(c.x, c.z, p.type.stackType)
-                placed += PlacedCube(c, Vec3i(c.x, y, c.z))
-            } else {
-                lost += c
+            val fromMystery = i == mysteryIndex
+            val type = if (!fromMystery) p.cellType(i) else when (effect!!) {
+                MysteryEffect.GOLD_RUSH -> PieceType.GOLD
+                MysteryEffect.HEAL -> PieceType.HEART
+                MysteryEffect.MULTIPLY -> PieceType.MULTIPLIER
+                MysteryEffect.CRACK -> PieceType.CRACKED
+                MysteryEffect.BOMB, MysteryEffect.CURSE -> continue
+            }
+            if (!board.inside(c.x, c.z)) {
+                lost += LostCube(c, type)
+                continue
+            }
+            val fuse = if (type == PieceType.CRACKED) random.nextInt(CRACK_MIN_LAYERS, CRACK_MAX_LAYERS + 1) else 0
+            val y = board.push(c.x, c.z, type, fuse)
+            placed += PlacedCube(c, Vec3i(c.x, y, c.z), type)
+            when (type.kind) {
+                PieceType.Kind.HEART -> heart = true
+                PieceType.Kind.GOLD -> coins += if (fromMystery) MYSTERY_GOLD_COINS else GOLD_COINS
+                PieceType.Kind.MULTIPLIER -> gain += if (fromMystery) MYSTERY_MULTIPLIER_STEP else MULTIPLIER_STEP
+                PieceType.Kind.CRACKED -> if (!fromMystery) bonus += CRACKED_BONUS
+                else -> Unit
             }
         }
-        val perfect = lost.isEmpty() && placed.all { it.from.y == it.to.y }
-        var points = POINTS_PER_CUBE * placed.size
+        val acts = effect == MysteryEffect.BOMB || effect == MysteryEffect.CURSE
+        val perfect = !acts && placed.isNotEmpty() && lost.isEmpty() && placed.all { it.from.y == it.to.y }
+        var points = POINTS_PER_CUBE * placed.size + bonus
         if (perfect) points += PERFECT_BONUS
         points += newLayerPoints()
-        return LandingResult(p.type, origin, placed, lost, perfect, points)
+        val r = LandingResult(
+            p.type, origin, placed, lost, perfect, points,
+            healed = heart && hearts < MAX_HEARTS, coins = coins, multiplierGain = gain, mystery = effect,
+        )
+        if (mysteryIndex < 0) return r
+        val cell = world[mysteryIndex]
+        return when (effect) {
+            MysteryEffect.BOMB -> blast(r, cell)
+            // Shatters like an X cube on the board: costs a heart.
+            MysteryEffect.CURSE -> r.copy(
+                effectCell = cell, xHit = true, impact = Vec3i(cell.x, board.height(cell.x, cell.z), cell.z),
+            )
+            else -> r
+        }
+    }
+
+    /** Heal is only offered while a heart is missing. */
+    private fun rollMystery(): MysteryEffect =
+        MysteryEffect.entries.filter { it != MysteryEffect.HEAL || hearts < MAX_HEARTS }.random(random)
+
+    /** Breaks every cracked cube that now sits too far below the top of the tower; the cubes above it drop one layer. */
+    private fun crumble(): List<Vec3i> {
+        val out = ArrayList<Vec3i>()
+        while (true) {
+            val top = board.maxHeight()
+            val cube = crackedCubes().firstOrNull { top - it.y - 1 >= board.fuseAt(it.x, it.y, it.z) } ?: return out
+            board.removeAt(cube.x, cube.y, cube.z)
+            out += cube
+        }
+    }
+
+    private fun crackedCubes() = sequence {
+        for (x in 0 until Board.SIZE) for (z in 0 until Board.SIZE) for (y in 0 until board.height(x, z)) {
+            if (board.fuseAt(x, y, z) > 0) yield(Vec3i(x, y, z))
+        }
     }
 
     private fun newLayerPoints(): Int {
@@ -343,9 +455,14 @@ class GameLogic(
         return points
     }
 
-    /** Destroys every cube within one cell of the bomb (sideways) and [BLAST_DOWN] layers below it; the rest drop. */
-    private fun explode(p: Piece, origin: Vec3i): LandingResult {
-        val cell = p.worldCells().first()
+    private fun explode(p: Piece, origin: Vec3i) =
+        blast(LandingResult(p.type, origin, emptyList(), emptyList(), false, 0), p.worldCells().first())
+
+    /**
+     * A bomb dropped at [cell] sits on top of its column and destroys every cube within one cell of it (sideways),
+     * from [BLAST_DOWN] layers below to [BLAST_UP] above; the rest drop. Adds the blast to [r].
+     */
+    private fun blast(r: LandingResult, cell: Vec3i): LandingResult {
         val center = Vec3i(cell.x, board.height(cell.x, cell.z), cell.z)
         val cleared = ArrayList<Pair<Vec3i, PieceType>>()
         val shifted = ArrayList<PlacedCube>()
@@ -357,10 +474,12 @@ class GameLogic(
             if (hi < lo) continue
             for (y in hi downTo lo) cleared += Vec3i(x, y, z) to board.removeAt(x, y, z)
             val removed = hi - lo + 1
-            for (y in hi + 1 until h) shifted += PlacedCube(Vec3i(x, y, z), Vec3i(x, y - removed, z))
+            for (y in hi + 1 until h) shifted += PlacedCube(Vec3i(x, y, z), Vec3i(x, y - removed, z), board.typeAt(x, y - removed, z))
         }
-        val points = POINTS_PER_CLEARED * cleared.size
-        return LandingResult(p.type, origin, emptyList(), emptyList(), false, points, center, cleared, shifted)
+        return r.copy(
+            points = r.points + POINTS_PER_CLEARED * cleared.size, impact = center, exploded = true, effectCell = cell,
+            cleared = cleared, shifted = shifted,
+        )
     }
 
     /** Plain cubes stack as usual; the X cube shatters on the board (costing a heart) or falls away if it hangs off. */
@@ -368,22 +487,24 @@ class GameLogic(
         val base = place(p, origin)
         val cell = p.worldCells()[p.type.xIndex]
         return if (board.inside(cell.x, cell.z)) {
-            base.copy(perfect = false, xCell = cell, xHit = true, impact = Vec3i(cell.x, board.height(cell.x, cell.z), cell.z))
+            base.copy(perfect = false, effectCell = cell, xHit = true, impact = Vec3i(cell.x, board.height(cell.x, cell.z), cell.z))
         } else {
-            base.copy(xCell = cell, dodged = true, points = base.points + DODGE_BONUS)
+            base.copy(effectCell = cell, dodged = true, points = base.points + DODGE_BONUS)
         }
     }
 
     /** Debug/tests: swaps the falling piece for a fresh one of [type]. */
-    fun debugSpawn(type: PieceType) {
-        if (current != null) spawnAs(type)
+    fun debugSpawn(type: PieceType) = debugSpawn(PieceSpec(type))
+
+    fun debugSpawn(spec: PieceSpec) {
+        if (current != null) spawnAs(spec)
     }
 
     /** Debug/autoplay: re-orient and reposition the current piece without collision kicks. */
     fun debugPlace(cells: List<Vec3i>, x: Int, z: Int): Boolean {
         val p = current ?: return false
-        // X pieces locate their X cube by index, so their shape can't be swapped out.
-        if (p.type.kind == PieceType.Kind.X && cells.size != p.cells.size) return false
+        // X and attached special cubes are found by index, so those pieces' shapes can't be swapped out.
+        if ((p.type.kind == PieceType.Kind.X || p.spec.special != null) && cells.size != p.cells.size) return false
         if (!fits(cells, x, p.y, z)) return false
         p.cells = cells
         p.x = x
@@ -393,7 +514,6 @@ class GameLogic(
 
     companion object {
         const val MAX_HEARTS = 3
-        const val HEART_BLOCK_CHANCE = 0.01f
         const val SCORE_PER_COIN = 100
 
         fun coinsFor(score: Int) = score / SCORE_PER_COIN
@@ -420,5 +540,17 @@ class GameLogic(
         const val X_CHANCE = 0.08f
         const val BLAST_DOWN = 1
         const val BLAST_UP = 1
+
+        const val GOLD_COINS = 2
+        /** Tenths of a multiplier: a Multiplier Block adds ×0.1. */
+        const val MULTIPLIER_STEP = 1
+        const val CRACKED_BONUS = 40
+        /** A cracked cube crumbles once this many layers (picked at random per cube) sit above it. */
+        const val CRACK_MIN_LAYERS = 10
+        const val CRACK_MAX_LAYERS = 15
+        const val MYSTERY_GOLD_COINS = 10
+        const val MYSTERY_MULTIPLIER_STEP = 3
+        /** Chance that a shop special comes attached to a regular piece instead of as a lone cube. */
+        const val ATTACH_CHANCE = 0.5f
     }
 }

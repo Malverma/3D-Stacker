@@ -21,6 +21,8 @@ enum class PieceType(
     CORNER(0x6BCB77, cells("000", "100", "001")),
     SQUARE(0xB983FF, cells("000", "100", "001", "101")),
     TEE(0xFF9F45, cells("000", "100", "200", "101")),
+    PLUS(0x2EC4B6, cells("100", "001", "101", "201", "102")),
+    ZIGZAG(0xC0E218, cells("101", "201", "000", "100")),
 
     /** Clears nearby cubes where it lands; never costs a heart. */
     BOMB(0x2E2E3A, cells("000"), Kind.BOMB),
@@ -33,9 +35,21 @@ enum class PieceType(
     X_BAR(0x4D96FF, cells("000", "100", "200"), Kind.X, xIndex = 2),
 
     /** Shop unlock: stays in the tower like a normal cube and restores a heart (up to the max). */
-    HEART(0xFF8FB8, cells("000"), Kind.HEART);
+    HEART(0xFF8FB8, cells("000"), Kind.HEART),
 
-    enum class Kind { NORMAL, BOMB, X, HEART }
+    /** Shop unlock: stays in the tower and pays a few coins when placed on the board. */
+    GOLD(0xFFC93C, cells("000"), Kind.GOLD),
+
+    /** Shop unlock: stays in the tower and raises the run's score multiplier when placed on the board. */
+    MULTIPLIER(0x7B4DFF, cells("000"), Kind.MULTIPLIER),
+
+    /** Shop unlock: worth bonus points, but crumbles once the tower climbs 10–15 layers above it. */
+    CRACKED(0x9A8F84, cells("000"), Kind.CRACKED),
+
+    /** Shop unlock: turns into a random effect, good or bad, when it lands on the board. */
+    MYSTERY(0x3FD1C4, cells("000"), Kind.MYSTERY);
+
+    enum class Kind { NORMAL, BOMB, X, HEART, GOLD, MULTIPLIER, CRACKED, MYSTERY }
 
     /** The type stored in the tower for this piece's plain cubes (X pieces stack as their base shape). */
     val stackType: PieceType
@@ -50,6 +64,9 @@ enum class PieceType(
     companion object {
         val normals = entries.filter { it.kind == Kind.NORMAL }
         val xPieces = entries.filter { it.kind == Kind.X }
+
+        /** Specials that only spawn once bought in the shop; their chances come from the player's upgrade levels. */
+        val unlockables = listOf(HEART, GOLD, MULTIPLIER, CRACKED, MYSTERY)
     }
 }
 
@@ -93,9 +110,48 @@ object Orientation {
     }
 }
 
+/**
+ * What to spawn: a [type] and its [cells], optionally with a shop [special] cube attached to a regular piece.
+ * The attached cube is always the last cell; cell order survives rotation, so that stays valid.
+ */
+data class PieceSpec(val type: PieceType, val cells: List<Vec3i> = type.cells, val special: PieceType? = null) {
+    val specialIndex: Int get() = if (special == null) -1 else cells.lastIndex
+
+    /** Anything but a plain regular piece: specials never come twice in a row. */
+    val isSpecial: Boolean get() = type.kind != PieceType.Kind.NORMAL || special != null
+
+    /** The block each cell is: the attached special, the X cube (its piece's own type), or the plain stacking type. */
+    fun cellType(i: Int): PieceType = when {
+        i == specialIndex -> special!!
+        type.isX(i) -> type
+        else -> type.stackType
+    }
+
+    companion object {
+        /** No piece is ever longer than this along any axis. */
+        const val MAX_LENGTH = 3
+
+        /** [base] with a [special] cube attached to one of its sides, picked at random among spots that keep it short enough. */
+        fun attached(base: PieceType, special: PieceType, random: kotlin.random.Random): PieceSpec {
+            val cells = base.cells
+            val spots = cells.flatMap { c ->
+                listOf(Vec3i(c.x + 1, c.y, c.z), Vec3i(c.x - 1, c.y, c.z), Vec3i(c.x, c.y, c.z + 1), Vec3i(c.x, c.y, c.z - 1))
+            }.distinct().filter { spot ->
+                spot !in cells && (cells + spot).let { all ->
+                    Orientation.extent(all) { it.x } <= MAX_LENGTH && Orientation.extent(all) { it.z } <= MAX_LENGTH
+                }
+            }
+            return PieceSpec(base, Orientation.normalize(cells + spots.random(random)), special)
+        }
+    }
+}
+
 /** A falling piece: local [cells] plus the world position of its origin. */
-class Piece(val type: PieceType, cells: List<Vec3i>, var x: Int, var y: Int, var z: Int) {
-    var cells: List<Vec3i> = Orientation.normalize(cells)
+class Piece(val spec: PieceSpec, var x: Int, var y: Int, var z: Int) {
+    val type: PieceType get() = spec.type
+    var cells: List<Vec3i> = Orientation.normalize(spec.cells)
+
+    fun cellType(i: Int) = spec.cellType(i)
 
     fun worldCells(): List<Vec3i> = cells.map { Vec3i(it.x + x, it.y + y, it.z + z) }
 }

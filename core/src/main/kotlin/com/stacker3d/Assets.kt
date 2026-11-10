@@ -10,6 +10,8 @@ import com.badlogic.gdx.graphics.g2d.SpriteBatch
 import com.badlogic.gdx.graphics.g2d.freetype.FreeTypeFontGenerator
 import com.badlogic.gdx.utils.Disposable
 import com.stacker3d.render.Models
+import com.stacker3d.shop.BlockSkin
+import com.stacker3d.shop.Catalog
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -57,6 +59,10 @@ class Assets(private val settings: Settings) : Disposable {
     val sGameOver = sfx("gameover")
     val sPerfect = sfx("perfect")
     val sBoom = sfx("boom")
+    private val skinLandSounds = Catalog.skins.mapNotNull { it.landSound }.distinct().associateWith { sfx(it) }
+
+    /** Landing sound for the equipped block skin. */
+    fun landSound(skin: BlockSkin): Sound = skin.landSound?.let { skinLandSounds[it] } ?: sLand
 
     private val generator = FreeTypeFontGenerator(Gdx.files.internal("fonts/NotoSans-Black.ttf"))
     lateinit var fontTitle: BitmapFont; private set

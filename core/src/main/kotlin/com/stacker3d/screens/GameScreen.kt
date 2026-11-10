@@ -28,6 +28,7 @@ import com.stacker3d.ui.UiButton
 import com.stacker3d.ui.dim
 import com.stacker3d.ui.panel
 import com.stacker3d.ui.text
+import java.util.Locale
 import kotlin.math.min
 
 class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Listener, GestureInput.Actions {
@@ -75,7 +76,7 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
     )
 
     init {
-        world.onImpact = { a.play(a.sLand, 0.9f, 1f + min(logic.towerHeight, 60) * 0.01f) }
+        world.onImpact = { a.play(a.landSound(a.models.skin), 0.9f, a.models.skin.landPitch * (1f + min(logic.towerHeight, 60) * 0.01f)) }
         world.onExplode = {
             boomFlash = 1f
             boomText?.let { popups += Popup(it, ACCENT) }
@@ -83,9 +84,15 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
             a.play(a.sBoom)
             a.vibrate(90)
         }
+        world.onCrumble = { count ->
+            popups += Popup(if (count > 1) "CRUMBLED x$count!" else "CRUMBLED!", STONE)
+            a.play(a.sFall, 0.7f, 0.8f)
+            a.vibrate(60)
+        }
         logic.immortal = game.debug.immortal
-        if (game.settings.heartBlockUnlocked) logic.heartBlockChance = GameLogic.HEART_BLOCK_CHANCE
-        a.models.skin = Catalog.skin(game.settings.skinId)
+        logic.specialChances = game.debug.specialChance?.let { c -> PieceType.unlockables.associateWith { c } }
+            ?: game.settings.specialChances()
+        a.models.skin = Catalog.skin(game.debug.skinId ?: game.settings.skinId)
         world.theme = Catalog.sky(game.settings.skyId)
         logic.start()
     }
@@ -146,7 +153,8 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
 
     override fun onSpawn(piece: Piece) {
         world.onSpawn(piece)
-        when (piece.type.kind) {
+        // An attached special gets the same banner as a lone one.
+        when ((piece.spec.special ?: piece.type).kind) {
             PieceType.Kind.BOMB -> {
                 popups += Popup("BOMB!", ACCENT, 1.8f)
                 popups += Popup("CLEARS NEARBY BLOCKS", Color.WHITE, 1.8f)
@@ -159,6 +167,22 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
                 popups += Popup("HEART BLOCK!", HEART_PINK, 1.8f)
                 popups += Popup("PLACE IT TO HEAL", Color.WHITE, 1.8f)
             }
+            PieceType.Kind.GOLD -> {
+                popups += Popup("GOLDEN BLOCK!", ACCENT, 1.8f)
+                popups += Popup("PLACE IT FOR +${GameLogic.GOLD_COINS} COINS", Color.WHITE, 1.8f)
+            }
+            PieceType.Kind.MULTIPLIER -> {
+                popups += Popup("MULTIPLIER BLOCK!", MULTIPLIER_PURPLE, 1.8f)
+                popups += Popup("PLACE IT FOR +0.1x SCORE", Color.WHITE, 1.8f)
+            }
+            PieceType.Kind.CRACKED -> {
+                popups += Popup("CRACKED BLOCK!", STONE, 1.8f)
+                popups += Popup("+${GameLogic.CRACKED_BONUS} NOW, CRUMBLES LATER", Color.WHITE, 1.8f)
+            }
+            PieceType.Kind.MYSTERY -> {
+                popups += Popup("MYSTERY BLOCK!", MYSTERY_TEAL, 1.8f)
+                popups += Popup("ANYTHING CAN HAPPEN", Color.WHITE, 1.8f)
+            }
             PieceType.Kind.NORMAL -> Unit
         }
     }
@@ -167,14 +191,24 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
         world.onLanded(result)
         world.towerHeight = logic.towerHeight
         popups.removeAll { it.life > 1.1f }
+        val mystery = result.mystery
+        if (mystery != null) popups += Popup("MYSTERY: ${mystery.label}!", if (mystery.good) MYSTERY_TEAL else DANGER, 1.6f)
         when {
-            result.type.kind == PieceType.Kind.BOMB -> boomText = "BOOM! +${result.points}"
-            result.xHit -> popups += Popup("OUCH! X BLOCK", DANGER)
+            result.exploded -> boomText = "BOOM! +${result.points}"
+            result.xHit -> popups += Popup(if (mystery != null) "OUCH! CURSED" else "OUCH! X BLOCK", DANGER)
             result.dodged -> {
                 popups += Popup("DODGED! +${result.points}", ACCENT)
                 a.play(a.sPerfect, 0.5f)
             }
             else -> popups += Popup("+${result.points}", Color.WHITE)
+        }
+        if (result.coins > 0) {
+            popups += Popup("+${result.coins} COINS", ACCENT)
+            a.play(a.sPerfect, 0.6f, 1.4f)
+        }
+        if (result.multiplierGain > 0) {
+            popups += Popup("SCORE ${multiplierLabel()}", MULTIPLIER_PURPLE)
+            a.play(a.sPerfect, 0.6f, 1.1f)
         }
         if (result.perfect) {
             popups += Popup("PERFECT!", ACCENT)
@@ -225,7 +259,7 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
         gameOverTime = 0f
         world.gameOver = true
         val s = game.settings
-        coinsEarned = GameLogic.coinsFor(logic.score)
+        coinsEarned = GameLogic.coinsFor(logic.score) + logic.bonusCoins
         s.coins += coinsEarned
         newRecord = logic.score > s.highScore
         if (newRecord) s.highScore = logic.score
@@ -341,6 +375,17 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
             batch.draw(if (full) a.heartFull else a.heartEmpty, x, y, size, size)
         }
         text(batch, a.fontSmall, "HEIGHT ${logic.towerHeight}", m + 6f * u, top - m - hs - 45f * u, Align.left)
+        // Run readouts under the height: score multiplier, and coins from Golden Blocks (paid out at game over).
+        var ry = top - m - hs - 110f * u
+        if (logic.multiplierTenths > 10) {
+            text(batch, a.fontSmall, "SCORE ${multiplierLabel()}", m + 6f * u, ry, Align.left)
+            ry -= 65f * u
+        }
+        if (logic.bonusCoins > 0) {
+            val cs = 50f * u
+            batch.draw(a.coin, m + 6f * u, ry - cs / 2f, cs, cs)
+            text(batch, a.fontSmall, "+${logic.bonusCoins}", m + 6f * u + cs + 10f * u, ry, Align.left)
+        }
 
         // Score (top-center).
         text(batch, a.fontLarge, logic.score.toString(), w / 2f, top - m - 55f * u)
@@ -451,6 +496,8 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
         if (t >= 1f) activeButtons().forEach { it.draw(batch, a) }
     }
 
+    private fun multiplierLabel() = String.format(Locale.US, "x%.1f", logic.multiplier)
+
     override fun dispose() {
         world.dispose()
         preview.dispose()
@@ -459,5 +506,8 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
 
     companion object {
         const val OVER_PANEL_DELAY = 1.4f
+        private val MULTIPLIER_PURPLE: Color = Color.valueOf("B79CFF")
+        private val STONE: Color = Color.valueOf("D8CFC4")
+        private val MYSTERY_TEAL: Color = Color.valueOf("5FF0E0")
     }
 }

@@ -22,6 +22,10 @@ data class DebugOptions(
     val screenshotPrefix: String? = null,
     val screenshotTimes: List<Float> = emptyList(),
     val startScreen: String = "menu",
+    /** Spawn chance for every shop special regardless of what's owned, to see them in action. */
+    val specialChance: Float? = null,
+    /** Block skin id to use instead of the equipped one. */
+    val skinId: String? = null,
 )
 
 class StackerGame(val debug: DebugOptions = DebugOptions()) : Game() {
@@ -33,6 +37,8 @@ class StackerGame(val debug: DebugOptions = DebugOptions()) : Game() {
     override fun create() {
         Gdx.input.setCatchKey(Input.Keys.BACK, true)
         settings = Settings(Gdx.app.getPreferences("stacker3d"))
+        // TESTING: top up coins on every launch. Remove before release.
+        if (settings.coins < TEST_COINS) settings.coins = TEST_COINS
         assets = Assets(settings)
         assets.resize(Gdx.graphics.width, Gdx.graphics.height)
         when {
@@ -94,3 +100,6 @@ class StackerGame(val debug: DebugOptions = DebugOptions()) : Game() {
         assets.dispose()
     }
 }
+
+/** TESTING: coin balance the game tops up to on launch. */
+private const val TEST_COINS = 5000

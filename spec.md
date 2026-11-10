@@ -96,12 +96,25 @@ All pieces are built from 1×1×1 cubes. MVP set:
 
 ### Special blocks
 
-Specials start appearing after the first 4 pieces and never come twice in a row. Each spawn has a 5% chance of a Bomb and an 8% chance of an X piece. A short banner explains each one when it appears.
+Specials start appearing after the first 4 pieces and never come twice in a row. Each spawn has a 5% chance of a Bomb and an 8% chance of an X piece, plus the chance of every shop special the player owns (§8b). One roll covers all of them, so the chances add up. A short banner explains each one when it appears.
 
 | Block | Look | Effect |
 |---|---|---|
 | **Bomb** | Black cube with a lit bomb | When it lands, it explodes. It destroys every cube within one cell sideways of where it landed, from 1 layer below it to 1 layer above it. Cubes above the blast drop down to fill the hole. **Never costs a heart.** +15 points per cube destroyed. |
 | **X piece** | A 1×2 domino or 1×3 bar with a red X cube on one end | The plain cubes stack like a normal piece. The X cube never joins the tower. If it lands on the board, you **lose a heart** and it shatters. If it hangs off the edge, it falls away safely and scores +25 ("DODGED!"). So you have to rotate and slide the piece until the plain cubes are on the board and the X end is off. Like any piece, at least one cube must stay over the board. A piece costs at most 1 heart, even if the X lands on the board and plain cubes also spill. The X cube's landing shadow is always red. |
+
+**Shop specials** (only spawn once bought, see §8b). Each one is a single special cube. Half the time it comes alone, and half the time it comes **attached to a regular piece** from the bag: one extra cube on a free side of the piece, wherever the result stays at most **3 long** on every axis (so a bar only takes it on its side, never its end). Pieces are never 4 long.
+- A lone special cube can't leave the board entirely, so it always lands, and it never costs a heart.
+- An attached piece is a regular piece: if any of its cubes miss the board (including the special cube), it costs a heart and the missed special does nothing.
+- Bombs always come alone, because an attached bomb would blow up its own piece. X pieces already come as a domino or bar with an X cube.
+
+| Block | Look | Effect |
+|---|---|---|
+| **Heart Block** | Pink cube with a heart | Stays in the tower. Restores 1 heart, unless you already have 3. |
+| **Golden Block** | Gold cube with a star | Stays in the tower. **+2 coins**, paid out with the score coins when the run ends. The HUD shows the run's bonus coins under the height. |
+| **Multiplier Block** | Purple cube with up chevrons | Stays in the tower. Raises the run's **score multiplier by ×0.1** (×1.0 → ×1.1 → ×1.2 …). The multiplier applies to every later landing's points, not to the block's own landing, and resets each run. Shown as "SCORE ×1.2" under the height. |
+| **Cracked Block** | Grey stone cube with cracks | Stays in the tower and scores **+40 bonus points**. Each one gets a random fuse of **10–15 layers**: once that many layers sit above it (measured against the tallest column), it crumbles. The cube is removed and everything above it in that column drops one layer, which can unbalance the tower. Bombs can destroy it early. |
+| **Mystery Block** | Teal/blue/purple cube with a "?" | Very rare. On landing over the board it turns into a random effect, shown as "MYSTERY: …": **Gold Rush** (becomes a Golden Block worth +10 coins), **Heal** (becomes a Heart Block; only rolled when a heart is missing), **Multiply** (becomes a Multiplier Block worth +×0.3), **Bomb** (explodes like a Bomb, after the rest of its piece has stacked), **Cracked** (becomes a Cracked Block, without the bonus) or **Curse** (shatters like an X cube and costs a heart). |
 
 - Pieces are drawn with a **shuffled-bag randomizer**: every piece type appears once per bag, in random order. This prevents long streaks of the same piece.
 - A **"Next" preview** in the HUD shows the upcoming piece.
@@ -160,7 +173,7 @@ Specials start appearing after the first 4 pieces and never come twice in a row.
 ## 8b. Coins, Revive & Shop
 
 ### Coins
-- When a run ends, you earn **1 coin per 100 points** (rounded down). A score of 1200 gives 12 coins.
+- When a run ends, you earn **1 coin per 100 points** (rounded down), plus any coins from Golden Blocks. A score of 1200 gives 12 coins.
 - Coins are saved on the device. The balance shows on the main menu and in the shop, and the game-over screen shows "+N COINS".
 
 ### Revive (rewarded ad)
@@ -176,12 +189,28 @@ The SHOP button is on the main menu, under Play and Settings. It has three tabs:
 | Tab | Items | Price |
 |---|---|---|
 | **Backgrounds** | Classic Sky (default) and **Neon Nights**, a synthwave pink/purple gradient with stars from the start | Free / 100 coins |
-| **Blocks** | Classic Mix (default, one color per piece type), plus 6 single-color sets that paint every block one color: All Ruby, All Gold, All Mint, All Ocean, All Grape, All Snow | Free / 100 coins each |
-| **Specials** | **Heart Block** | 250 coins |
+| **Blocks** | Classic Mix (default, one color per piece type), plus 6 single-color sets that paint every block one color: Ruby, Gold, Mint, Ocean, Grape, Snow. Two premium sets: **Slime** and **Bubble Gum** (below) | Free / 100 coins each / 300 coins each |
+| **Specials** | Heart, Golden, Multiplier, Cracked and Mystery Blocks (§6) | see below |
 
 - Buying a background or block set equips it right away. Owned items can be re-equipped at any time, and only one of each kind is active.
-- Bomb, X and heart cubes always keep their printed faces, whatever block colors are equipped.
-- **Heart Block:** once unlocked, each spawn has a **1% chance** of being a Heart Block (a pink 1×1 cube with a heart). It stacks like a normal cube and stays in the tower. When it lands on the board it **restores 1 heart**, unless you already have 3. If it falls off the board, nothing happens.
+- Special cubes always keep their printed faces, whatever block colors are equipped.
+- **Slime:** see-through glossy green blocks. Each block mixes one of four styles (bubbly with a few small white bubbles, clear, a dark core floating inside, cloudy swirls) in slightly varied shades. Blocks jiggle when a piece lands on or near them, and the wobble ripples out a few cells and down the tower; bombs and crumbles shake them too. Landings play a squelch.
+- **Bubble Gum:** solid pink blocks in three styles (bubbly, swirled, hot pink). They sag, grow drips down over the block below, and stick together: they stretch to close the gaps between layers and slowly spread wider under the weight of the blocks above. They jiggle slower and gooier than slime, with a lower squelch. All of this is visual only; the tower still lines up with the grid.
+
+#### Special block upgrades
+Every shop special starts locked. Buying it unlocks **level 1**, and it can then be upgraded with coins up to **level 5**. Each level adds a little spawn chance. An upgrade from level L costs `price × L / 2` coins (for example, the Golden Block costs 75, 150, 225 and 300). The row shows the current spawn chance and the level as five pips on the swatch.
+
+| Special | Unlock price | Spawn chance at level 1 | Per level | At level 5 |
+|---|---|---|---|---|
+| Heart Block | 250 | 0.4% | +0.15% | 1% |
+| Golden Block | 150 | 2% | +0.5% | 4% |
+| Multiplier Block | 300 | 1% | +0.25% | 2% |
+| Cracked Block | 100 | 2% | +0.5% | 4% |
+| Mystery Block | 500 | 0.3% | +0.1% | 0.7% |
+
+**Balance:** hearts are kept scarce so that losing one still matters. X pieces alone are 8% of spawns. A Heart Block at level 1 heals about once per 250 pieces (roughly once per run), and two or three times per run fully upgraded. A Mystery Block can roll Heal only while a heart is missing. With everything at level 5, the shop specials total about 12% of spawns (Bomb and X add 13%).
+
+Players who bought the Heart Block before upgrades existed keep it at level 1.
 
 ## 9. Screens & UI
 
@@ -246,5 +275,6 @@ The tower is unbounded, so cubes far below the camera's view (e.g. more than 30 
 - Cubes settle onto the cube below after landing, so the tower never has gaps (§4).
 - Pieces **can stand upright**, using the tip gesture or button (§5).
 - Special blocks: the Bomb and the X piece (§6). X pieces are a domino or bar with an X cube on one end.
+- Shop specials (Heart, Golden, Multiplier, Cracked, Mystery) are bought and upgraded for spawn chance; the Bomb and X piece stay free core mechanics (§8b).
 - Gap rule: lose if any cell trails the tallest column by more than 10 levels (§4).
 - Engine: libGDX with Kotlin (§11).

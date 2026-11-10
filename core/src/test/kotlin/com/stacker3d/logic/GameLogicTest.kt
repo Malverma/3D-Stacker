@@ -42,6 +42,13 @@ class GameLogicTest {
 
     private fun v(x: Int, y: Int, z: Int) = Vec3i(x, y, z)
 
+    private fun GameLogic.awaitAndDrop(type: PieceType, cells: List<Vec3i>, x: Int, z: Int) {
+        while (current == null) update(0.1f)
+        debugSpawn(type)
+        assertTrue(debugPlace(Orientation.normalize(cells), x, z))
+        hardDrop()
+    }
+
     @Test
     fun `cube over a gap settles onto the cube below`() {
         single(0, 0)
@@ -141,7 +148,7 @@ class GameLogicTest {
 
         val last = rec.landings.last()
         assertEquals(3, logic.board.height(2, 2)) // layers 1..3 gone, 4..5 dropped to 1..2
-        assertTrue(last.shifted.contains(PlacedCube(v(2, 5, 2), v(2, 2, 2))))
+        assertTrue(last.shifted.any { it.from == v(2, 5, 2) && it.to == v(2, 2, 2) })
         assertEquals(1, logic.board.height(1, 1))
     }
 
@@ -251,13 +258,13 @@ class GameLogicTest {
     }
 
     @Test
-    fun `heart blocks only spawn once unlocked`() {
-        fun count(chance: Float): Int {
-            val l = GameLogic(Random(9)).apply { heartBlockChance = chance; start() }
-            var hearts = 0
+    fun `shop specials only spawn once unlocked`() {
+        fun count(type: PieceType, chance: Float): Int {
+            val l = GameLogic(Random(9)).apply { specialChances = if (chance > 0f) mapOf(type to chance) else emptyMap(); start() }
+            var seen = 0
             repeat(300) {
                 while (l.current == null) l.update(0.1f)
-                if (l.current!!.type == PieceType.HEART) hearts++
+                if (l.current!!.type == type) seen++
                 if (l.current!!.type.kind == PieceType.Kind.X) l.debugSpawn(PieceType.SINGLE)
                 // Keep the board level so the gap rule never ends the run.
                 val col = (0 until 9).minBy { l.board.height(it % 3, it / 3) }
@@ -265,10 +272,226 @@ class GameLogicTest {
                 l.hardDrop()
                 if (l.isGameOver) l.start()
             }
-            return hearts
+            return seen
         }
-        assertEquals(0, count(0f))
-        assertTrue(count(GameLogic.HEART_BLOCK_CHANCE * 20) > 0)
+        for (type in PieceType.unlockables) {
+            assertEquals(0, count(type, 0f), "$type locked")
+            assertTrue(count(type, 0.2f) > 0, "$type unlocked")
+        }
+    }
+
+    @Test
+    fun `golden block pays coins only when placed on the board`() {
+        drop(listOf(v(0, 0, 0)), 1, 1, PieceType.GOLD)
+        assertEquals(GameLogic.GOLD_COINS, rec.landings.last().coins)
+        assertEquals(GameLogic.GOLD_COINS, logic.bonusCoins)
+        assertEquals(PieceType.GOLD, logic.board.typeAt(1, 0, 1))
+    }
+
+    @Test
+    fun `multiplier block raises the score multiplier for later landings`() {
+        drop(listOf(v(0, 0, 0)), 0, 0, PieceType.MULTIPLIER)
+        // Its own landing still scores at x1.0: 10 + 50 new layer + 25 perfect.
+        assertEquals(85, logic.score)
+        assertEquals(11, logic.multiplierTenths)
+        drop(listOf(v(0, 0, 0)), 1, 0, PieceType.MULTIPLIER)
+        assertEquals(12, logic.multiplierTenths)
+        // Single on an empty cell: (10 + 25 perfect) * 1.2 = 42.
+        single(2, 2)
+        assertEquals(42, rec.landings.last().points)
+    }
+
+    @Test
+    fun `multiplier resets with a new run`() {
+        drop(listOf(v(0, 0, 0)), 0, 0, PieceType.MULTIPLIER)
+        drop(listOf(v(0, 0, 0)), 1, 1, PieceType.GOLD)
+        logic.start()
+        assertEquals(10, logic.multiplierTenths)
+        assertEquals(0, logic.bonusCoins)
+    }
+
+    @Test
+    fun `cracked block crumbles 10 to 15 layers down and the column drops`() {
+        drop(listOf(v(0, 0, 0)), 0, 0, PieceType.CRACKED)
+        // 10 per cube + 40 cracked bonus + 50 new layer + 25 perfect.
+        assertEquals(125, rec.landings.last().points)
+        val fuse = logic.board.fuseAt(0, 0, 0)
+        assertTrue(fuse in GameLogic.CRACK_MIN_LAYERS..GameLogic.CRACK_MAX_LAYERS)
+
+        fillLevel(fuse) // tower top is now `fuse` tall: fuse - 1 layers above the cracked cube
+        assertTrue(rec.landings.none { it.crumbled.isNotEmpty() })
+        assertEquals(PieceType.CRACKED, logic.board.typeAt(0, 0, 0))
+
+        single(1, 1) // one more layer on another column breaks it
+        assertEquals(listOf(v(0, 0, 0)), rec.landings.last().crumbled)
+        assertEquals(fuse - 1, logic.board.height(0, 0))
+        assertTrue((0 until logic.board.height(0, 0)).none { logic.board.typeAt(0, it, 0) == PieceType.CRACKED })
+        assertEquals(3, logic.hearts)
+    }
+
+    @Test
+    fun `bombed cracked cubes are gone for good`() {
+        drop(listOf(v(0, 0, 0)), 0, 0, PieceType.CRACKED)
+        drop(listOf(v(0, 0, 0)), 0, 0, PieceType.BOMB)
+        assertEquals(0, logic.board.height(0, 0))
+        fillLevel(GameLogic.CRACK_MAX_LAYERS + 1)
+        assertTrue(rec.landings.none { it.crumbled.isNotEmpty() })
+    }
+
+    @Test
+    fun `mystery block can turn into every effect`() {
+        val seen = HashSet<MysteryEffect>()
+        for (seed in 0 until 80) {
+            val r = Recorder()
+            val l = GameLogic(Random(seed), r).apply { start() }
+            while (l.current == null) l.update(0.1f)
+            l.debugSpawn(PieceType.MYSTERY)
+            l.debugPlace(listOf(v(0, 0, 0)), 1, 1)
+            l.hardDrop()
+            val result = r.landings.last()
+            val effect = result.mystery!!
+            seen += effect
+            when (effect) {
+                MysteryEffect.GOLD_RUSH -> {
+                    assertEquals(GameLogic.MYSTERY_GOLD_COINS, l.bonusCoins)
+                    assertEquals(PieceType.GOLD, l.board.typeAt(1, 0, 1))
+                }
+                MysteryEffect.MULTIPLY -> assertEquals(10 + GameLogic.MYSTERY_MULTIPLIER_STEP, l.multiplierTenths)
+                MysteryEffect.BOMB -> {
+                    assertTrue(result.exploded)
+                    assertFalse(result.perfect)
+                }
+                MysteryEffect.CRACK -> assertTrue(l.board.fuseAt(1, 0, 1) > 0)
+                MysteryEffect.CURSE -> {
+                    assertEquals(2, l.hearts)
+                    assertEquals(0, l.board.height(1, 1))
+                }
+                MysteryEffect.HEAL -> error("can't heal at full hearts")
+            }
+        }
+        assertEquals(MysteryEffect.entries.toSet() - MysteryEffect.HEAL, seen)
+    }
+
+    @Test
+    fun `mystery block can heal when a heart is missing`() {
+        var healed = false
+        for (seed in 0 until 80) {
+            val r = Recorder()
+            val l = GameLogic(Random(seed), r).apply { start() }
+            l.awaitAndDrop(PieceType.DOMINO, listOf(v(0, 0, 0), v(1, 0, 0)), 2, 2) // spill: 2 hearts left
+            l.awaitAndDrop(PieceType.MYSTERY, listOf(v(0, 0, 0)), 1, 1)
+            if (r.landings.last().mystery == MysteryEffect.HEAL) {
+                assertEquals(3, l.hearts)
+                healed = true
+            }
+        }
+        assertTrue(healed)
+    }
+
+    @Test
+    fun `attached specials sit beside a regular piece and are never 4 long`() {
+        val random = Random(4)
+        for (base in PieceType.normals) for (special in PieceType.unlockables) repeat(20) {
+            val spec = PieceSpec.attached(base, special, random)
+            assertEquals(base.cells.size + 1, spec.cells.size)
+            assertEquals(spec.cells.size, spec.cells.toSet().size, "no overlapping cubes")
+            for (axis in listOf<(Vec3i) -> Int>({ it.x }, { it.y }, { it.z })) {
+                assertTrue(Orientation.extent(spec.cells, axis) <= PieceSpec.MAX_LENGTH, "$base + $special: ${spec.cells}")
+            }
+            val extra = spec.cells.last()
+            assertTrue(spec.cells.dropLast(1).any { (it.x - extra.x).let { d -> d * d } + (it.z - extra.z).let { d -> d * d } == 1 })
+            assertEquals(special, spec.cellType(spec.specialIndex))
+            assertEquals(base, spec.cellType(0))
+        }
+    }
+
+    @Test
+    fun `shop specials also spawn attached to regular pieces`() {
+        val l = GameLogic(Random(5)).apply { specialChances = mapOf(PieceType.GOLD to 0.3f); start() }
+        var lone = 0
+        var attached = 0
+        repeat(400) {
+            val next = l.next
+            if (next.special == PieceType.GOLD) attached++
+            if (next.type == PieceType.GOLD) lone++
+            while (l.current == null) l.update(0.1f)
+            l.debugSpawn(PieceType.SINGLE)
+            val col = (0 until 9).minBy { l.board.height(it % 3, it / 3) }
+            l.debugPlace(listOf(v(0, 0, 0)), col % 3, col / 3)
+            l.hardDrop()
+            if (l.isGameOver) l.start()
+        }
+        assertTrue(lone > 0 && attached > 0, "lone=$lone attached=$attached")
+    }
+
+    private fun dominoWith(special: PieceType) = PieceSpec(PieceType.DOMINO, listOf(v(0, 0, 0), v(1, 0, 0), v(2, 0, 0)), special)
+
+    private fun dropSpec(spec: PieceSpec, x: Int, z: Int) {
+        while (logic.current == null) logic.update(0.1f)
+        logic.debugSpawn(spec)
+        assertTrue(logic.debugPlace(spec.cells, x, z))
+        logic.hardDrop()
+    }
+
+    @Test
+    fun `attached golden cube pays and stacks with its piece`() {
+        dropSpec(dominoWith(PieceType.GOLD), 0, 0)
+        val last = rec.landings.last()
+        assertEquals(GameLogic.GOLD_COINS, last.coins)
+        assertEquals(listOf(PieceType.DOMINO, PieceType.DOMINO, PieceType.GOLD), (0..2).map { logic.board.typeAt(it, 0, 0) })
+        // 3 cubes + new layer + perfect.
+        assertEquals(30 + 50 + 25, last.points)
+    }
+
+    @Test
+    fun `attached special hanging off the board is lost and costs a heart`() {
+        dropSpec(dominoWith(PieceType.HEART), 1, 0) // heart cube at x = 3, off the board
+        val last = rec.landings.last()
+        assertEquals(listOf(LostCube(v(3, 0, 0), PieceType.HEART)), last.lost)
+        assertFalse(last.healed)
+        assertEquals(2, logic.hearts)
+    }
+
+    @Test
+    fun `attached cracked cube gets a fuse and its bonus`() {
+        dropSpec(dominoWith(PieceType.CRACKED), 0, 0)
+        assertTrue(logic.board.fuseAt(2, 0, 0) in GameLogic.CRACK_MIN_LAYERS..GameLogic.CRACK_MAX_LAYERS)
+        assertEquals(0, logic.board.fuseAt(0, 0, 0))
+        assertEquals(30 + GameLogic.CRACKED_BONUS + 50 + 25, rec.landings.last().points)
+    }
+
+    @Test
+    fun `attached mystery cube acts after its piece stacks`() {
+        val seen = HashSet<MysteryEffect>()
+        for (seed in 0 until 80) {
+            val r = Recorder()
+            val l = GameLogic(Random(seed), r).apply { start() }
+            while (l.current == null) l.update(0.1f)
+            val spec = dominoWith(PieceType.MYSTERY)
+            l.debugSpawn(spec)
+            l.debugPlace(spec.cells, 0, 1)
+            l.hardDrop()
+            val result = r.landings.last()
+            seen += result.mystery!!
+            when (result.mystery) {
+                MysteryEffect.BOMB -> {
+                    // The domino stacked, then the blast took the cube next to the bomb; the far one survives.
+                    assertEquals(2, result.placed.size)
+                    assertTrue(result.exploded)
+                    assertEquals(v(2, 0, 1), result.impact)
+                    assertEquals(listOf(v(1, 0, 1)), result.cleared.map { it.first })
+                    assertEquals(1, l.board.height(0, 1))
+                    assertEquals(3, l.hearts)
+                }
+                MysteryEffect.CURSE -> {
+                    assertEquals(2, result.placed.size)
+                    assertEquals(2, l.hearts)
+                    assertEquals(0, l.board.height(2, 1))
+                }
+                else -> assertEquals(3, result.placed.size)
+            }
+        }
+        assertEquals(MysteryEffect.entries.toSet() - MysteryEffect.HEAL, seen)
     }
 
     @Test

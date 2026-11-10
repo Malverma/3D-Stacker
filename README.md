@@ -23,4 +23,4 @@ The project needs JDK 17 (pinned in `.mise.toml`) and the Android SDK (path in `
 
 Desktop keys: arrows/WASD move, R rotate, T tip, Space drop, Esc pause.
 
-Desktop test hooks (environment variables): `STACKER_AUTOPLAY=1` turns on the bot, `STACKER_CHAOS=1` makes it place pieces randomly, `STACKER_IMMORTAL=1` turns off heart loss, and `STACKER_START=menu|game|paused|settings|shop_backgrounds|shop_blocks|shop_specials` picks the start screen. To save screenshots, set `STACKER_SHOTS=/tmp/shot` and `STACKER_SHOT_TIMES=2,5`.
+Desktop test hooks (environment variables): `STACKER_AUTOPLAY=1` turns on the bot, `STACKER_CHAOS=1` makes it place pieces randomly, `STACKER_IMMORTAL=1` turns off heart loss, `STACKER_SPECIALS=0.1` makes every shop special spawn at that chance (owned or not), `STACKER_SKIN=skin_slime` forces a block skin without changing the save, and `STACKER_START=menu|game|paused|settings|shop_backgrounds|shop_blocks|shop_specials` picks the start screen. To save screenshots, set `STACKER_SHOTS=/tmp/shot` and `STACKER_SHOT_TIMES=2,5`.

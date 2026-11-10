@@ -16,6 +16,7 @@ import com.stacker3d.logic.GameLogic
 import com.stacker3d.logic.LandingResult
 import com.stacker3d.logic.Piece
 import com.stacker3d.logic.PieceType
+import com.stacker3d.logic.Vec3i
 import com.stacker3d.shop.Catalog
 import com.stacker3d.shop.SkyTheme
 import kotlin.math.abs
@@ -24,6 +25,7 @@ import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.sign
 import kotlin.math.tan
 
@@ -42,7 +44,7 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         get() = sky.theme
         set(value) { sky.theme = value }
 
-    private class Settle(val instance: ModelInstance, val x: Float, var y: Float, val targetY: Float, val z: Float, val group: Int) {
+    private class Settle(val instance: ModelInstance, val x: Float, var y: Float, var targetY: Float, val z: Float, val group: Int) {
         var velocity = 0f
     }
 
@@ -51,7 +53,10 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         var life = 0f
     }
 
-    /** A bomb or X block still falling toward its impact; the effect fires when it arrives. */
+    /**
+     * A bomb or X block (or cursed Mystery Block) still falling toward its impact; the effect fires when it arrives.
+     * Cracked cubes that crumble on the same landing wait for it, since the bomb changes the column first.
+     */
     private class Pending(val result: LandingResult, val instance: ModelInstance, var y: Float) {
         var velocity = 0f
     }
@@ -60,15 +65,34 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         var life = 0f
     }
 
+    private class Goo {
+        var age = 0f
+        /** 0..1: how flattened and spread out it is, easing toward the weight of the cubes above. */
+        var press = 0f
+        var drip = -1f
+    }
+
+    /** Jiggly-skin squash on a tower cube: a damped oscillation that starts after [delay] seconds. */
+    private class Wobble(var amp: Float, var delay: Float) {
+        var age = 0f
+        val t get() = age - delay
+        fun envelope(damp: Float) = if (t <= 0f) amp else amp * exp(-damp * t)
+    }
+
     /** Tower cubes per board column, indexed by layer. */
     private val columns = Array(Board.SIZE * Board.SIZE) { ArrayList<ModelInstance>() }
     private val settles = ArrayList<Settle>()
     private val debris = ArrayList<Debris>()
     private val flashes = ArrayList<Flash>()
+    private val wobbles = HashMap<ModelInstance, Wobble>()
+    private val wobblingColumns = BooleanArray(Board.SIZE * Board.SIZE)
     private var pending: Pending? = null
     private val pools = HashMap<Model, ArrayList<ModelInstance>>()
     private val impactedGroups = HashSet<Int>()
     private var groupCounter = 0
+    private var spawnCount = 0
+    /** Melting skins: how far along each tower cube is in growing drips and spreading under the weight above. */
+    private val goo = HashMap<ModelInstance, Goo>()
 
     private val visual = Vector3()
     private val tmp = Vector3()
@@ -79,6 +103,8 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
     var onImpact: (() -> Unit)? = null
     /** Called when a bomb actually goes off on screen. */
     var onExplode: (() -> Unit)? = null
+    /** Called when cracked cubes crumble on screen, with how many broke. */
+    var onCrumble: ((Int) -> Unit)? = null
 
     var towerHeight = 0
     var gameOver = false
@@ -125,6 +151,9 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         settles.clear()
         debris.clear()
         flashes.clear()
+        wobbles.clear()
+        goo.clear()
+        wobblingColumns.fill(false)
         pending = null
         impactedGroups.clear()
         towerHeight = 0
@@ -135,42 +164,84 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
     }
 
     /** Appends a cube on top of column (x, z); [fromY] makes it drop in from higher up. */
-    fun addCube(x: Int, z: Int, type: PieceType, fromY: Float? = null, group: Int = -1) {
+    fun addCube(x: Int, z: Int, type: PieceType, fromY: Float? = null, group: Int = -1, look: Int = MathUtils.random(Int.MAX_VALUE)) {
         val column = columns[x + z * Board.SIZE]
         val y = column.size
-        val instance = models.instance(type)
+        val instance = models.instance(type, look)
+        if (models.skin.melts) {
+            instance.setDrips(DRIP_START)
+            goo[instance] = Goo()
+        }
         val start = fromY ?: y.toFloat()
         instance.transform.setToTranslation(x - 1f, start + 0.5f, z - 1f)
         column.add(instance)
         if (start > y + 0.001f) settles += Settle(instance, x - 1f, start, y.toFloat(), z - 1f, group)
+        else if (group >= 0) jiggle(x, y, z, LAND_KICK)
     }
 
+    /**
+     * Seed for a falling cube's skin variety (bubble layout, shade), from the piece and the cube's offset in it,
+     * so it keeps the same look once it lands.
+     */
+    private fun look(dx: Int, dy: Int, dz: Int) = spawnCount * 7919 + (dx + 4) * 81 + (dy + 4) * 9 + dz + 4
+
     fun onSpawn(piece: Piece) {
+        spawnCount++
         visual.set(piece.x.toFloat(), piece.y.toFloat(), piece.z.toFloat())
     }
 
     fun onLanded(result: LandingResult) {
         pending?.let { resolvePending(it) }
         val offsetY = max(0f, visual.y - result.origin.y)
-        if (result.type.kind == PieceType.Kind.BOMB) {
-            val impact = result.impact!!
-            pending = Pending(result, models.instance(result.type), max(impact.y.toFloat(), result.origin.y + offsetY))
-            return
-        }
-        val cubeType = result.type.stackType
+        // Stack first: a bomb's blast indices count the cubes this same piece just placed.
         val group = ++groupCounter
-        for (p in result.placed) addCube(p.to.x, p.to.z, cubeType, p.from.y + offsetY, group)
+        val o = result.origin
+        for (p in result.placed) addCube(p.to.x, p.to.z, p.type, p.from.y + offsetY, group, look(p.from.x - o.x, p.from.y - o.y, p.from.z - o.z))
         if (result.placed.isNotEmpty() && result.placed.none { it.from.y + offsetY > it.to.y + 0.001f }) {
             impactedGroups += group
             onImpact?.invoke()
         }
-        for (c in result.lost) fallOff(models.instance(cubeType), c.x, c.y + offsetY, c.z)
-        val x = result.xCell
-        if (result.xHit && x != null) {
-            pending = Pending(result, ModelInstance(models.xBlock), max(result.impact!!.y.toFloat(), x.y + offsetY))
-        } else if (result.dodged && x != null) {
-            fallOff(ModelInstance(models.xBlock), x.x, x.y + offsetY, x.z)
+        for (c in result.lost) fallOff(models.instance(c.type), c.at.x, c.at.y + offsetY, c.at.z)
+        val cell = result.effectCell
+        if (cell != null && (result.exploded || result.xHit)) {
+            pending = Pending(result, ModelInstance(effectModel(result)), max(result.impact!!.y.toFloat(), cell.y + offsetY))
+        } else if (result.dodged && cell != null) {
+            fallOff(ModelInstance(models.xBlock), cell.x, cell.y + offsetY, cell.z)
         }
+        if (pending == null) crumble(result.crumbled)
+    }
+
+    /** The cube that falls to an impact: a bomb, the X cube, or a cursed Mystery cube (which shatters into its own shards). */
+    private fun effectModel(result: LandingResult): Model = when {
+        result.exploded -> models.bomb
+        result.type.kind == PieceType.Kind.X -> models.xBlock
+        else -> models.mysteryBlock
+    }
+
+    /** Breaks cracked cubes in the order the logic did, dropping everything above each one by a layer. */
+    private fun crumble(cells: List<Vec3i>) {
+        if (cells.isEmpty()) return
+        for (c in cells) {
+            val column = columns[c.x + c.z * Board.SIZE]
+            if (c.y >= column.size) continue
+            val broken = column.removeAt(c.y)
+            goo.remove(broken)
+            settles.removeAll { it.instance === broken }
+            jiggle(c.x, c.y, c.z, CRUMBLE_KICK)
+            val center = Vector3(c.x - 1f, c.y + 0.5f, c.z - 1f)
+            repeat(7) {
+                val dir = tmp.set(MathUtils.random(-1f, 1f), MathUtils.random(-0.2f, 0.8f), MathUtils.random(-1f, 1f)).nor()
+                addDebris(ModelInstance(models.crackedBlock), center.cpy(), Vector3(dir.x * 3.5f, dir.y * 4f, dir.z * 3.5f), 0.36f)
+            }
+            for (i in c.y until column.size) {
+                val above = column[i]
+                val settling = settles.firstOrNull { it.instance === above }
+                if (settling != null) settling.targetY = i.toFloat()
+                else settles += Settle(above, c.x - 1f, i + 1f, i.toFloat(), c.z - 1f, -1)
+            }
+        }
+        shake(0.5f)
+        onCrumble?.invoke(cells.size)
     }
 
     /** A cube that missed the board tumbles away outward. */
@@ -185,12 +256,13 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         val result = p.result
         val impact = result.impact!!
         val center = Vector3(impact.x - 1f, impact.y + 0.5f, impact.z - 1f)
-        if (result.type.kind == PieceType.Kind.BOMB) {
+        if (result.exploded) {
             // Remove blasted cubes (highest first so indices stay valid) and fling them outward.
             for ((pos, _) in result.cleared.sortedByDescending { it.first.y }) {
                 val column = columns[pos.x + pos.z * Board.SIZE]
                 if (pos.y >= column.size) continue
                 val inst = column.removeAt(pos.y)
+                goo.remove(inst)
                 settles.removeAll { it.instance === inst }
                 val from = Vector3(pos.x - 1f, pos.y + 0.5f, pos.z - 1f)
                 val dir = tmp.set(from).sub(center).add(MathUtils.random(-0.3f, 0.3f), 0.6f, MathUtils.random(-0.3f, 0.3f)).nor()
@@ -204,16 +276,94 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
                 settles += Settle(inst, s.to.x - 1f, s.from.y.toFloat(), s.to.y.toFloat(), s.to.z - 1f, -1)
             }
             flashes += Flash(ModelInstance(models.ghost), center, Color(1f, 0.6f, 0.15f, 1f))
+            jiggle(impact.x, impact.y, impact.z, BOMB_KICK)
             shake(1f)
             onExplode?.invoke()
         } else {
             // The X cube shatters into small shards.
+            val shard = effectModel(result)
             repeat(8) {
                 val dir = tmp.set(MathUtils.random(-1f, 1f), MathUtils.random(0.6f, 1.4f), MathUtils.random(-1f, 1f)).nor()
-                addDebris(ModelInstance(models.xBlock), center.cpy(), Vector3(dir.x * 5f, dir.y * 7f, dir.z * 5f), 0.32f)
+                addDebris(ModelInstance(shard), center.cpy(), Vector3(dir.x * 5f, dir.y * 7f, dir.z * 5f), 0.32f)
             }
             flashes += Flash(ModelInstance(models.ghost), center, Color(1f, 0.15f, 0.2f, 1f))
             onImpact?.invoke()
+        }
+        crumble(result.crumbled)
+    }
+
+    /**
+     * Starts tower cubes wobbling around cell ([x], [y], [z]) when the skin is jiggly. Strength falls off with
+     * grid distance and the wobble reaches farther cubes a little later, so it ripples out and down the tower.
+     */
+    private fun jiggle(x: Int, y: Int, z: Int, strength: Float) {
+        if (!models.skin.jiggly) return
+        for (ci in columns.indices) {
+            val column = columns[ci]
+            val reach = WOBBLE_REACH - abs(ci % Board.SIZE - x) - abs(ci / Board.SIZE - z)
+            if (reach < 0) continue
+            for (cy in max(0, y - reach)..min(column.size - 1, y + reach)) {
+                val d = WOBBLE_REACH - reach + abs(cy - y)
+                if (d > WOBBLE_REACH) continue
+                val add = strength * WOBBLE_FALLOFF.pow(d)
+                val delay = d * WOBBLE_DELAY
+                val w = wobbles[column[cy]]
+                if (w == null) wobbles[column[cy]] = Wobble(min(add, WOBBLE_MAX), delay)
+                else {
+                    // Kick a cube that's still moving: build on what's left of its wobble, restarting the swing.
+                    w.amp = min(w.envelope(models.skin.wobbleDamp) + add, WOBBLE_MAX)
+                    w.age = 0f
+                    w.delay = delay
+                }
+            }
+        }
+    }
+
+    /**
+     * Poses tower cubes for jiggly and melting skins, each anchored at its base. Wobbling cubes squash and the
+     * cubes above ride the squash so the column stays stacked; columns that wobbled last frame are redrawn once more
+     * at rest so nothing is left offset. Melting cubes also stretch to close the gaps around them (so they stick
+     * together), slowly spread under the weight of the cubes above, and grow their drips.
+     */
+    private fun poseTower(dt: Float) {
+        if (wobbles.isEmpty() && goo.isEmpty() && wobblingColumns.none { it }) return
+        for (w in wobbles.values) w.age += dt
+        val skin = models.skin
+        wobbles.values.removeAll { it.t > WOBBLE_FADE / skin.wobbleDamp }
+        val ease = 1f - exp(-dt / PRESS_TIME)
+        for (ci in columns.indices) {
+            val column = columns[ci]
+            val wobbling = column.any { it in wobbles }
+            if (!wobbling && !wobblingColumns[ci] && goo.isEmpty()) continue
+            wobblingColumns[ci] = wobbling
+            var sink = 0f
+            for (cy in column.indices) {
+                val inst = column[cy]
+                if (settles.any { it.instance === inst }) { sink = 0f; continue }
+                val w = wobbles[inst]
+                val squash = if (w != null && w.t > 0f) w.envelope(skin.wobbleDamp) * MathUtils.sin(skin.wobbleFreq * w.t) else 0f
+                var fill = 1f
+                var spread = 1f
+                val g = goo[inst]
+                if (g != null) {
+                    g.age += dt
+                    val above = column.size - 1 - cy
+                    g.press += (min(1f, PRESS_BASE + above * PRESS_PER_CUBE) - g.press) * ease
+                    fill = 1f + (STICK_FILL - 1f) * min(1f, g.age / STICK_TIME)
+                    spread = 1f + PRESS_SPREAD * g.press
+                    val t = min(1f, g.age / MELT_TIME)
+                    val drip = (DRIP_START + (1f - DRIP_START) * (1f - (1f - t) * (1f - t))) * (1f + DRIP_PRESS * g.press)
+                    if (abs(drip - g.drip) > 0.003f) {
+                        g.drip = drip
+                        inst.setDrips(drip)
+                    }
+                }
+                val sy = fill * (1f - squash)
+                val sxz = spread * (1f + squash * 0.5f)
+                inst.transform.setToTranslation(ci % Board.SIZE - 1f, cy + 0.5f + sink - CUBE_SIZE / 2f * (1f - sy), ci / Board.SIZE - 1f)
+                    .scale(sxz, sy, sxz)
+                sink -= CUBE_SIZE * fill * squash
+            }
         }
     }
 
@@ -261,9 +411,11 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
                 s.y = s.targetY
                 it.remove()
                 if (s.group >= 0 && impactedGroups.add(s.group)) onImpact?.invoke()
+                jiggle(MathUtils.round(s.x) + 1, MathUtils.round(s.y), MathUtils.round(s.z) + 1, if (s.group >= 0) LAND_KICK else SHIFT_KICK)
             }
             s.instance.transform.setToTranslation(s.x, s.y + 0.5f, s.z)
         }
+        poseTower(dt)
 
         val dIt = debris.iterator()
         while (dIt.hasNext()) {
@@ -332,17 +484,22 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         pools.values.forEach { it.forEach { inst -> inst.userData = null } }
 
         batch.begin(cam)
-        if (camY - viewHeight < 1f) batch.render(boardInstance, env)
+        if (camY - viewHeight < 1f) {
+            models.paintBoard(boardInstance)
+            batch.render(boardInstance, env)
+        }
         val lo = max(0, floor(camY - viewHeight * 1.2f).toInt())
         for (column in columns) for (y in lo until column.size) batch.render(column[y], env)
         for (d in debris) batch.render(d.instance, env)
         pending?.let { batch.render(it.instance, env) }
 
         if (piece != null) {
-            val type = piece.type
             for ((i, c) in piece.cells.withIndex()) {
-                val inst = pooled(models.cellModel(type, i))
-                if (!type.isX(i) && type.stackType.kind == PieceType.Kind.NORMAL) inst.diffuse().set(models.colorOf(type.stackType))
+                val type = piece.cellType(i)
+                val seed = look(c.x, c.y, c.z)
+                val inst = pooled(models.modelFor(type, seed))
+                if (models.skin.melts) inst.setDrips(DRIP_START)
+                if (type.kind == PieceType.Kind.NORMAL) inst.diffuse().set(models.colorOf(type, seed))
                 inst.transform.setToTranslation(visual.x + c.x - 1f, visual.y + c.y + 0.5f, visual.z + c.z - 1f)
                 batch.render(inst, env)
             }
@@ -421,5 +578,35 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         const val FLASH_TIME = 0.4f
         /** How far (in cells) above its shadow a falling cube starts fading that shadow out. */
         const val GHOST_FADE_DISTANCE = 0.6f
+
+        // Jiggly skins: squash amount (fraction of cube height) for each kind of hit, and how the wobble spreads.
+        const val LAND_KICK = 0.16f
+        const val SHIFT_KICK = 0.08f
+        const val CRUMBLE_KICK = 0.14f
+        const val BOMB_KICK = 0.22f
+        const val WOBBLE_MAX = 0.24f
+        /** Strength kept per grid step away from the hit. */
+        const val WOBBLE_FALLOFF = 0.55f
+        /** Grid steps (|dx| + |dy| + |dz|) a hit reaches. */
+        const val WOBBLE_REACH = 4
+        /** Seconds the ripple takes per grid step. */
+        const val WOBBLE_DELAY = 0.05f
+        /** A wobble stops once it has decayed to about 1% (e^-4.6). */
+        const val WOBBLE_FADE = 4.6f
+        /** Melting skins: drip length while falling, and seconds to reach full length after landing. */
+        const val DRIP_START = 0.2f
+        const val MELT_TIME = 2.5f
+        /** Drips grow this much longer on a fully pressed cube. */
+        const val DRIP_PRESS = 0.45f
+        /** Melting skins stretch to this height (closing the gap to the cube above) over [STICK_TIME] seconds. */
+        const val STICK_FILL = 1f / CUBE_SIZE + 0.01f
+        const val STICK_TIME = 0.35f
+        /** Press a melting cube eases toward: a little on its own, plus this much per cube resting on it. */
+        const val PRESS_BASE = 0.25f
+        const val PRESS_PER_CUBE = 0.25f
+        /** Seconds for the press to settle most of the way, so the tower visibly sinks into itself. */
+        const val PRESS_TIME = 2.5f
+        /** How much wider a fully pressed cube gets; enough to merge into its neighbors. */
+        const val PRESS_SPREAD = 0.1f
     }
 }
