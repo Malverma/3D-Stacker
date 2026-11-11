@@ -164,7 +164,7 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
     }
 
     /** Appends a cube on top of column (x, z); [fromY] makes it drop in from higher up. */
-    fun addCube(x: Int, z: Int, type: PieceType, fromY: Float? = null, group: Int = -1, look: Int = MathUtils.random(Int.MAX_VALUE)) {
+    fun addCube(x: Int, z: Int, type: PieceType, fromY: Float? = null, group: Int = -1, look: Int = MathUtils.random.nextInt(Int.MAX_VALUE)) {
         val column = columns[x + z * Board.SIZE]
         val y = column.size
         val instance = models.instance(type, look)
