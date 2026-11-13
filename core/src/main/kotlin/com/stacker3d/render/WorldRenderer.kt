@@ -27,6 +27,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sign
+import kotlin.math.sqrt
 import kotlin.math.tan
 
 /**
@@ -80,12 +81,15 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
     }
 
     /** Tower cubes per board column, indexed by layer. */
-    private val columns = Array(Board.SIZE * Board.SIZE) { ArrayList<ModelInstance>() }
+    private val columns = Array(Board.SPAN * Board.SPAN) { ArrayList<ModelInstance>() }
+
+    /** Which cells the board covers on screen; grows with [LandingResult.grown] in No Fall mode. */
+    private val footprint = Board()
     private val settles = ArrayList<Settle>()
     private val debris = ArrayList<Debris>()
     private val flashes = ArrayList<Flash>()
     private val wobbles = HashMap<ModelInstance, Wobble>()
-    private val wobblingColumns = BooleanArray(Board.SIZE * Board.SIZE)
+    private val wobblingColumns = BooleanArray(Board.SPAN * Board.SPAN)
     private var pending: Pending? = null
     private val pools = HashMap<Model, ArrayList<ModelInstance>>()
     private val impactedGroups = HashSet<Int>()
@@ -95,6 +99,9 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
     private val goo = HashMap<ModelInstance, Goo>()
 
     private val visual = Vector3()
+    /** The falling piece as of the last [update], for touch hit tests. */
+    private var current: Piece? = null
+    private val hull = FloatArray(16)
     private val tmp = Vector3()
     private val tmp2 = Vector3()
     private var time = 0f
@@ -114,7 +121,17 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
     var lift = 0f
 
     private var yaw = BASE_YAW
+    /** Yaw the view settles on during play: BASE_YAW plus whole quarter turns. */
+    private var targetYaw = BASE_YAW
+    /** Live offset while the player twists the board with two fingers. */
+    private var twist = 0f
     private var dist = 20f
+    private var aspect = 1f
+    /** World x/z the camera looks at: the footprint's center (eased toward [frameX]/[frameZ]). */
+    private var lookX = 0f
+    private var lookZ = 0f
+    private var frameX = 0f
+    private var frameZ = 0f
     private var currentDist = 20f
     private var viewHeight = 14f
     private var camY = Float.NaN
@@ -128,10 +145,8 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
     fun resize(width: Int, height: Int) {
         screenW = width.toFloat()
         screenH = height.toFloat()
-        val aspect = screenW / screenH
-        val halfH = tan(FOV / 2f * MathUtils.degreesToRadians)
-        dist = max(VISIBLE_HALF_WIDTH / (halfH * aspect), MIN_VISIBLE_HALF_HEIGHT / halfH)
-        viewHeight = 2f * dist * halfH
+        aspect = screenW / screenH
+        frame()
         if (camY.isNaN()) {
             currentDist = dist
             camY = towerHeight + towerOffset()
@@ -141,6 +156,21 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         cam.near = 0.5f
         cam.far = 200f
         updateCamera(0f)
+    }
+
+    /**
+     * Fits the camera to the board: centered on the footprint, and pulled back as far as a grown board needs
+     * (the extra is how much farther its corners reach than the 3×3's).
+     */
+    private fun frame() {
+        val halfH = tan(FOV / 2f * MathUtils.degreesToRadians)
+        val hx = (footprint.maxX - footprint.minX + 1) / 2f
+        val hz = (footprint.maxZ - footprint.minZ + 1) / 2f
+        val extra = max(0f, sqrt(hx * hx + hz * hz) - CLASSIC_REACH)
+        dist = max((VISIBLE_HALF_WIDTH + extra) / (halfH * aspect), (MIN_VISIBLE_HALF_HEIGHT + extra) / halfH)
+        viewHeight = 2f * dist * halfH
+        frameX = (footprint.minX + footprint.maxX) / 2f - 1f
+        frameZ = (footprint.minZ + footprint.maxZ) / 2f - 1f
     }
 
     /** Places the camera target so the tower top sits about a third of the way up the screen. */
@@ -158,14 +188,20 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         impactedGroups.clear()
         towerHeight = 0
         gameOver = false
+        footprint.clear()
+        frame()
+        lookX = frameX
+        lookZ = frameZ
         yaw = BASE_YAW
+        targetYaw = BASE_YAW
+        twist = 0f
         currentDist = dist
         camY = towerOffset() - lift
     }
 
     /** Appends a cube on top of column (x, z); [fromY] makes it drop in from higher up. */
     fun addCube(x: Int, z: Int, type: PieceType, fromY: Float? = null, group: Int = -1, look: Int = MathUtils.random.nextInt(Int.MAX_VALUE)) {
-        val column = columns[x + z * Board.SIZE]
+        val column = columns[Board.index(x, z)]
         val y = column.size
         val instance = models.instance(type, look)
         if (models.skin.melts) {
@@ -193,6 +229,10 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
     fun onLanded(result: LandingResult) {
         pending?.let { resolvePending(it) }
         val offsetY = max(0f, visual.y - result.origin.y)
+        if (result.grown.isNotEmpty()) {
+            for (g in result.grown) footprint.grow(g.x, g.z)
+            frame()
+        }
         // Stack first: a bomb's blast indices count the cubes this same piece just placed.
         val group = ++groupCounter
         val o = result.origin
@@ -211,6 +251,29 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         if (pending == null) crumble(result.crumbled)
     }
 
+    /**
+     * Gap-continue: drops filler cubes into their columns from just above the tower, each column a beat after the
+     * last and each cube a little after the one below, so the holes visibly fill up. [cells] are bottom-up per column.
+     */
+    fun fillGaps(cells: List<Vec3i>, type: PieceType) {
+        val start = columns.maxOf { it.size } + FILL_DROP
+        var col = -1
+        var colIndex = -1
+        var k = 0
+        var group = -1
+        for (c in cells) {
+            val ci = Board.index(c.x, c.z)
+            if (ci != col) {
+                col = ci
+                colIndex++
+                k = 0
+                group = ++groupCounter
+            }
+            addCube(c.x, c.z, type, start + colIndex * FILL_COLUMN_STAGGER + k * FILL_CUBE_STAGGER, group)
+            k++
+        }
+    }
+
     /** The cube that falls to an impact: a bomb, the X cube, or a cursed Mystery cube (which shatters into its own shards). */
     private fun effectModel(result: LandingResult): Model = when {
         result.exploded -> models.bomb
@@ -222,7 +285,7 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
     private fun crumble(cells: List<Vec3i>) {
         if (cells.isEmpty()) return
         for (c in cells) {
-            val column = columns[c.x + c.z * Board.SIZE]
+            val column = columns[Board.index(c.x, c.z)]
             if (c.y >= column.size) continue
             val broken = column.removeAt(c.y)
             goo.remove(broken)
@@ -259,7 +322,7 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         if (result.exploded) {
             // Remove blasted cubes (highest first so indices stay valid) and fling them outward.
             for ((pos, _) in result.cleared.sortedByDescending { it.first.y }) {
-                val column = columns[pos.x + pos.z * Board.SIZE]
+                val column = columns[Board.index(pos.x, pos.z)]
                 if (pos.y >= column.size) continue
                 val inst = column.removeAt(pos.y)
                 goo.remove(inst)
@@ -270,7 +333,7 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
             }
             // Survivors above the blast drop into the hole.
             for (s in result.shifted) {
-                val column = columns[s.to.x + s.to.z * Board.SIZE]
+                val column = columns[Board.index(s.to.x, s.to.z)]
                 val inst = column.getOrNull(s.to.y) ?: continue
                 settles.removeAll { it.instance === inst }
                 settles += Settle(inst, s.to.x - 1f, s.from.y.toFloat(), s.to.y.toFloat(), s.to.z - 1f, -1)
@@ -300,7 +363,8 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         if (!models.skin.jiggly) return
         for (ci in columns.indices) {
             val column = columns[ci]
-            val reach = WOBBLE_REACH - abs(ci % Board.SIZE - x) - abs(ci / Board.SIZE - z)
+            if (column.isEmpty()) continue
+            val reach = WOBBLE_REACH - abs(Board.xOf(ci) - x) - abs(Board.zOf(ci) - z)
             if (reach < 0) continue
             for (cy in max(0, y - reach)..min(column.size - 1, y + reach)) {
                 val d = WOBBLE_REACH - reach + abs(cy - y)
@@ -360,7 +424,7 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
                 }
                 val sy = fill * (1f - squash)
                 val sxz = spread * (1f + squash * 0.5f)
-                inst.transform.setToTranslation(ci % Board.SIZE - 1f, cy + 0.5f + sink - CUBE_SIZE / 2f * (1f - sy), ci / Board.SIZE - 1f)
+                inst.transform.setToTranslation(Board.xOf(ci) - 1f, cy + 0.5f + sink - CUBE_SIZE / 2f * (1f - sy), Board.zOf(ci) - 1f)
                     .scale(sxz, sy, sxz)
                 sink -= CUBE_SIZE * fill * squash
             }
@@ -376,17 +440,107 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         shakeAmount = max(shakeAmount, amount)
     }
 
-    /** Maps a screen swipe (x right, y up) to a one-cell board move along the axis that best matches it. */
-    fun swipeToCell(sx: Float, sy: Float): IntArray {
-        val fwd = tmp.set(cam.direction.x, 0f, cam.direction.z).nor()
-        val right = tmp2.set(-fwd.z, 0f, fwd.x)
-        val wx = sx * right.x + sy * fwd.x
-        val wz = sx * right.z + sy * fwd.z
-        return if (abs(wx) >= abs(wz)) intArrayOf(sign(wx).toInt(), 0) else intArrayOf(0, sign(wz).toInt())
+    /**
+     * Converts a screen drag (pixels, x right, y up) into board cells along X and Z by inverting how one
+     * cell step on each axis projects onto the screen at the falling piece. Works at any view angle.
+     */
+    fun dragToCells(sx: Float, sy: Float, out: FloatArray) {
+        val o = cam.project(tmp.set(visual.x - 1f, visual.y + 0.5f, visual.z - 1f), 0f, 0f, screenW, screenH)
+        val ox = o.x; val oy = o.y
+        val a = cam.project(tmp.set(visual.x, visual.y + 0.5f, visual.z - 1f), 0f, 0f, screenW, screenH)
+        val ax = a.x - ox; val ay = a.y - oy
+        val b = cam.project(tmp.set(visual.x - 1f, visual.y + 0.5f, visual.z), 0f, 0f, screenW, screenH)
+        val bx = b.x - ox; val by = b.y - oy
+        val det = ax * by - ay * bx
+        if (abs(det) < 1e-3f) { out[0] = 0f; out[1] = 0f; return }
+        out[0] = (sx * by - sy * bx) / det
+        out[1] = (ax * sy - ay * sx) / det
+    }
+
+    /**
+     * True if a touch at ([sx], [sy]) — screen pixels, y down — lands on the board or the tower standing on
+     * it (but not on the falling piece), i.e. a drag there should spin the board.
+     */
+    fun touchesBoard(sx: Float, sy: Float): Boolean {
+        val y = screenH - sy
+        val piece = current
+        if (piece != null) {
+            // The piece wins where it overlaps the tower: test its screen bounds, padded a little.
+            var minX = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE; var minY = Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
+            for (c in piece.cells) for (corner in 0..7) {
+                val p = cam.project(
+                    tmp.set(visual.x + c.x - 1.5f + (corner and 1), visual.y + c.y + (corner shr 1 and 1), visual.z + c.z - 1.5f + (corner shr 2 and 1)),
+                    0f, 0f, screenW, screenH,
+                )
+                minX = min(minX, p.x); maxX = max(maxX, p.x); minY = min(minY, p.y); maxY = max(maxY, p.y)
+            }
+            val pad = min(screenW, screenH) * 0.03f
+            if (sx in minX - pad..maxX + pad && y in minY - pad..maxY + pad) return false
+        }
+        // Convex hull of the board slab and the tower's bounding box, projected to the screen.
+        val top = max(0.5f, columns.maxOf { it.size }.toFloat())
+        for (corner in 0..7) {
+            val p = cam.project(
+                tmp.set(
+                    if (corner and 1 == 0) footprint.minX - 1.8f else footprint.maxX - 0.2f,
+                    if (corner and 2 == 0) -0.8f else top,
+                    if (corner and 4 == 0) footprint.minZ - 1.8f else footprint.maxZ - 0.2f,
+                ),
+                0f, 0f, screenW, screenH,
+            )
+            hull[corner * 2] = p.x; hull[corner * 2 + 1] = p.y
+        }
+        return insideHull(hull, sx, y)
+    }
+
+    /** Point-in-convex-hull of 8 points: inside if it isn't strictly outside any edge between two of them. */
+    private fun insideHull(pts: FloatArray, x: Float, y: Float): Boolean {
+        for (i in 0..7) for (j in 0..7) {
+            if (i == j) continue
+            val ax = pts[i * 2]; val ay = pts[i * 2 + 1]
+            val ex = pts[j * 2] - ax; val ey = pts[j * 2 + 1] - ay
+            // An edge of the hull has every other point on one side; skip pairs that aren't hull edges.
+            var allLeft = true
+            for (k in 0..7) if (k != i && k != j && ex * (pts[k * 2 + 1] - ay) - ey * (pts[k * 2] - ax) < -1e-3f) { allLeft = false; break }
+            if (allLeft && ex * (y - ay) - ey * (x - ax) < 0f) return false
+        }
+        return true
+    }
+
+    /** Quarter turns the view is (or is settling) away from the default angle. */
+    private val quarterTurns get() = MathUtils.round((targetYaw - BASE_YAW) / 90f).mod(4)
+
+    /** Rotates a move given in default-view board axes so it matches what the player sees now. */
+    fun viewToBoard(dx: Int, dz: Int): IntArray = when (quarterTurns) {
+        1 -> intArrayOf(dz, -dx)
+        2 -> intArrayOf(-dx, -dz)
+        3 -> intArrayOf(-dz, dx)
+        else -> intArrayOf(dx, dz)
+    }
+
+    /** Turns the board view by [steps] quarter turns (positive orbits the camera to the right). */
+    fun rotateView(steps: Int) {
+        targetYaw += steps * 90f
+    }
+
+    /** Follows a two-finger twist live; [degrees] is the total since the twist started. */
+    fun twistView(degrees: Float) {
+        twist = degrees
+    }
+
+    /** Ends a twist, snapping to the nearest quarter turn (a short flick still commits one turn). */
+    fun endTwist() {
+        val turns = when {
+            abs(twist) < TWIST_COMMIT -> 0
+            else -> sign(twist).toInt() * max(1, MathUtils.round(abs(twist) / 90f))
+        }
+        targetYaw += turns * 90f
+        twist = 0f
     }
 
     fun update(dt: Float, piece: Piece?) {
         time += dt
+        current = piece
         if (piece != null) {
             val k = 1f - exp(-18f * dt)
             visual.x += (piece.x - visual.x) * k
@@ -451,25 +605,32 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
             yaw += 14f * dt
             goalY = towerHeight / 2f + 0.5f
             goalDist = max(dist, (towerHeight + 5f) / (2f * halfH) * 1.1f)
-        } else {
+        } else if (orbitSpeed != 0f) {
             yaw += orbitSpeed * dt
+            goalY = towerHeight + towerOffset() - lift
+            goalDist = dist
+        } else {
+            val goalYaw = targetYaw + twist
+            yaw = if (twist != 0f || dt == 0f) goalYaw else yaw + (goalYaw - yaw) * (1f - exp(-12f * dt))
             goalY = towerHeight + towerOffset() - lift
             goalDist = dist
         }
         val k = if (dt == 0f) 1f else 1f - exp(-2.5f * dt)
         camY += (goalY - camY) * k
+        lookX += (frameX - lookX) * k
+        lookZ += (frameZ - lookZ) * k
         currentDist += (goalDist - currentDist) * (if (dt == 0f) 1f else 1f - exp(-1.5f * dt))
         shakeAmount = max(0f, shakeAmount - dt * 1.5f)
 
         val p = PITCH * MathUtils.degreesToRadians
         val y = yaw * MathUtils.degreesToRadians
         cam.position.set(
-            MathUtils.sin(y) * cos(p) * currentDist,
+            lookX + MathUtils.sin(y) * cos(p) * currentDist,
             camY + MathUtils.sin(p) * currentDist,
-            MathUtils.cos(y) * cos(p) * currentDist,
+            lookZ + MathUtils.cos(y) * cos(p) * currentDist,
         )
         cam.up.set(Vector3.Y)
-        cam.lookAt(0f, camY, 0f)
+        cam.lookAt(lookX, camY, lookZ)
         if (shakeAmount > 0f) {
             val s = shakeAmount * shakeAmount * 0.5f
             cam.position.add(MathUtils.random(-s, s), MathUtils.random(-s, s), MathUtils.random(-s, s))
@@ -485,8 +646,20 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
 
         batch.begin(cam)
         if (camY - viewHeight < 1f) {
-            models.paintBoard(boardInstance)
-            batch.render(boardInstance, env)
+            if (footprint.isClassic) {
+                models.paintBoard(boardInstance)
+                batch.render(boardInstance, env)
+            } else {
+                // A grown board is drawn tile by tile, checkered like the 3×3.
+                for (i in footprint.cells) {
+                    val x = Board.xOf(i)
+                    val z = Board.zOf(i)
+                    val inst = pooled(models.boardTile)
+                    models.paintTile(inst, (x + z).mod(2) == 1)
+                    inst.transform.setToTranslation(x - 1f, 0f, z - 1f)
+                    batch.render(inst, env)
+                }
+            }
         }
         val lo = max(0, floor(camY - viewHeight * 1.2f).toInt())
         for (column in columns) for (y in lo until column.size) batch.render(column[y], env)
@@ -540,15 +713,15 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
     }
 
     private fun renderWarnings(heights: IntArray) {
-        val top = heights.max()
+        val top = footprint.cells.maxOf { heights[it] }
         val pulse = 0.22f + 0.12f * MathUtils.sin(time * 6f)
-        for (i in heights.indices) {
+        for (i in footprint.cells) {
             val gap = top - heights[i]
             if (gap < GameLogic.GAP_WARNING) continue
             val inst = pooled(models.pillar)
             val danger = (gap - GameLogic.GAP_WARNING + 1f) / (GameLogic.GAP_LIMIT - GameLogic.GAP_WARNING + 1f)
             inst.blending().opacity = pulse + 0.2f * danger
-            inst.transform.setToTranslation(i % Board.SIZE - 1f, heights[i] + gap / 2f, i / Board.SIZE - 1f)
+            inst.transform.setToTranslation(Board.xOf(i) - 1f, heights[i] + gap / 2f, Board.zOf(i) - 1f)
                 .scale(0.9f, gap.toFloat(), 0.9f)
             batch.render(inst, env)
         }
@@ -571,9 +744,13 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         const val FOV = 38f
         const val PITCH = 30f
         const val BASE_YAW = 45f
+        /** Degrees a two-finger twist must reach before release turns the board. */
+        const val TWIST_COMMIT = 20f
         /** World units that must fit across the screen around the board center (board + overhang room). */
         const val VISIBLE_HALF_WIDTH = 4.1f
         const val MIN_VISIBLE_HALF_HEIGHT = 6.5f
+        /** Half-diagonal of the 3×3 board: how far its corners reach from the center at any view angle. */
+        val CLASSIC_REACH = 1.5f * sqrt(2f)
         const val GRAVITY = 40f
         const val FLASH_TIME = 0.4f
         /** How far (in cells) above its shadow a falling cube starts fading that shadow out. */
@@ -598,6 +775,10 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         const val MELT_TIME = 2.5f
         /** Drips grow this much longer on a fully pressed cube. */
         const val DRIP_PRESS = 0.45f
+        /** Gap-continue filler cubes start this far above the tower top, staggered per column and per cube. */
+        const val FILL_DROP = 2f
+        const val FILL_COLUMN_STAGGER = 0.9f
+        const val FILL_CUBE_STAGGER = 1.1f
         /** Melting skins stretch to this height (closing the gap to the cube above) over [STICK_TIME] seconds. */
         const val STICK_FILL = 1f / CUBE_SIZE + 0.01f
         const val STICK_TIME = 0.35f

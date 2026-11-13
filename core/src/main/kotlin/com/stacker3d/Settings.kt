@@ -16,6 +16,20 @@ class Settings(private val prefs: Preferences) {
         get() = prefs.getInteger("bestHeight", 0)
         set(v) { prefs.putInteger("bestHeight", v).flush() }
 
+    /** Highest height milestone ever reached; each one pays coins only the first time. */
+    /** No Fall mode keeps its own records. */
+    var noFallHighScore: Int
+        get() = prefs.getInteger("noFallHighScore", 0)
+        set(v) { prefs.putInteger("noFallHighScore", v).flush() }
+
+    var noFallBestHeight: Int
+        get() = prefs.getInteger("noFallBestHeight", 0)
+        set(v) { prefs.putInteger("noFallBestHeight", v).flush() }
+
+    var bestMilestone: Int
+        get() = prefs.getInteger("bestMilestone", 0)
+        set(v) { prefs.putInteger("bestMilestone", v).flush() }
+
     var sound: Boolean
         get() = prefs.getBoolean("sound", true)
         set(v) { prefs.putBoolean("sound", v).flush() }

@@ -24,6 +24,7 @@ import com.stacker3d.ui.ACCENT
 import com.stacker3d.ui.ButtonInput
 import com.stacker3d.ui.DANGER
 import com.stacker3d.ui.HEART_PINK
+import com.stacker3d.ui.TextSize
 import com.stacker3d.ui.UiButton
 import com.stacker3d.ui.dim
 import com.stacker3d.ui.panel
@@ -31,10 +32,13 @@ import com.stacker3d.ui.text
 import java.util.Locale
 import kotlin.math.min
 
-class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Listener, GestureInput.Actions {
+class GameScreen(private val game: StackerGame, private val noFall: Boolean = false) : ScreenAdapter(), GameLogic.Listener, GestureInput.Actions {
     private enum class State { PLAYING, PAUSED, REVIVE, GAME_OVER }
 
-    private class Popup(val text: String, val color: Color, val life: Float = 1.1f, var age: Float = 0f)
+    /** [sticky] popups (milestones, unlocks) stay up through the next landing instead of being cleared by it. */
+    private class Popup(
+        val text: String, val color: Color, val life: Float = 1.1f, var age: Float = 0f, val sticky: Boolean = false,
+    )
 
     private val a = game.assets
     private val world = WorldRenderer(a.models)
@@ -54,6 +58,10 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
     private var boomText: String? = null
     private var healFlash = 0f
     private var coinsEarned = 0
+    /** Coins already added to the balance this run (an ad continue can bring the run back after a payout). */
+    private var coinsBanked = 0
+    /** Coins from height milestones this run. They are banked the moment they are earned. */
+    private var milestoneCoins = 0
     private val popups = ArrayList<Popup>()
     private val glyphs = GlyphLayout()
 
@@ -63,12 +71,21 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
     private val dropBtn = UiButton(icon = a.btnDrop) { drop() }
     private val resumeBtn = UiButton("RESUME", primary = true) { state = State.PLAYING }
     private val restartBtn = UiButton("RESTART") { restart() }
+    /** Records for the mode being played (No Fall keeps its own). */
+    private var highScore: Int
+        get() = if (noFall) game.settings.noFallHighScore else game.settings.highScore
+        set(v) { if (noFall) game.settings.noFallHighScore = v else game.settings.highScore = v }
+    private var bestHeight: Int
+        get() = if (noFall) game.settings.noFallBestHeight else game.settings.bestHeight
+        set(v) { if (noFall) game.settings.noFallBestHeight = v else game.settings.bestHeight = v }
+
     private val settingsBtn = UiButton("SETTINGS") { game.showSettings { game.setScreen(this) } }
     private val menuBtn = UiButton("MENU") { game.showMenu() }
     private val againBtn = UiButton("PLAY AGAIN", primary = true) { restart() }
     private val overMenuBtn = UiButton("MENU") { game.showMenu() }
     private val watchAdBtn = UiButton("WATCH AD", primary = true, labelIcon = a.heartFull) { watchAd() }
     private val noThanksBtn = UiButton("NO THANKS") { finishGameOver() }
+    private val continueBtn = UiButton("WATCH AD & CONTINUE", primary = true, textSize = TextSize.SMALL) { watchAdContinue() }
 
     private val input = InputMultiplexer(
         ButtonInput(a, ::activeButtons) { onBack() },
@@ -90,6 +107,7 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
             a.vibrate(60)
         }
         logic.immortal = game.debug.immortal
+        logic.noFall = noFall
         logic.specialChances = game.debug.specialChance?.let { c -> PieceType.unlockables.associateWith { c } }
             ?: game.settings.specialChances()
         a.models.skin = Catalog.skin(game.debug.skinId ?: game.settings.skinId)
@@ -101,7 +119,11 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
         State.PLAYING -> if (game.settings.showButtons) listOf(pauseBtn, rotateBtn, tipBtn, dropBtn) else listOf(pauseBtn)
         State.PAUSED -> listOf(resumeBtn, restartBtn, settingsBtn, menuBtn)
         State.REVIVE -> listOf(watchAdBtn, noThanksBtn)
-        State.GAME_OVER -> if (gameOverTime > OVER_PANEL_DELAY) listOf(againBtn, overMenuBtn) else emptyList()
+        State.GAME_OVER -> when {
+            gameOverTime <= OVER_PANEL_DELAY -> emptyList()
+            logic.canReviveGaps -> listOf(continueBtn, againBtn, overMenuBtn)
+            else -> listOf(againBtn, overMenuBtn)
+        }
     }
 
     private fun onBack() {
@@ -122,6 +144,8 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
         boomFlash = 0f
         healFlash = 0f
         coinsEarned = 0
+        coinsBanked = 0
+        milestoneCoins = 0
         state = State.PLAYING
         logic.start()
     }
@@ -130,14 +154,22 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
 
     override val enabled get() = state == State.PLAYING && autoplay == null
 
-    override fun move(sx: Float, sy: Float) {
-        val (dx, dz) = world.swipeToCell(sx, sy)
-        logic.move(dx, dz)
+    override fun dragToCells(sx: Float, sy: Float, out: FloatArray) = world.dragToCells(sx, sy, out)
+
+    override fun touchesBoard(sx: Float, sy: Float) = world.touchesBoard(sx, sy)
+
+    override fun moveCell(dx: Int, dz: Int) = logic.move(dx, dz)
+
+    override fun moveView(dx: Int, dz: Int) {
+        val (bx, bz) = world.viewToBoard(dx, dz)
+        logic.move(bx, bz)
     }
 
-    override fun moveCell(dx: Int, dz: Int) {
-        logic.move(dx, dz)
-    }
+    override fun rotateView(steps: Int) = world.rotateView(steps)
+
+    override fun twistView(degrees: Float) = world.twistView(degrees)
+
+    override fun endTwist() = world.endTwist()
 
     override fun rotate() {
         logic.rotate()
@@ -187,10 +219,15 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
         }
     }
 
+    override fun onPiecesUnlocked(types: List<PieceType>) {
+        popups += Popup("BIGGER PIECES!", ACCENT, 2.2f, sticky = true)
+        popups += Popup("${types.size} NEW SHAPES IN PLAY", Color.WHITE, 2.2f, sticky = true)
+    }
+
     override fun onLanded(result: LandingResult) {
         world.onLanded(result)
         world.towerHeight = logic.towerHeight
-        popups.removeAll { it.life > 1.1f }
+        popups.removeAll { it.life > 1.1f && !it.sticky }
         val mystery = result.mystery
         if (mystery != null) popups += Popup("MYSTERY: ${mystery.label}!", if (mystery.good) MYSTERY_TEAL else DANGER, 1.6f)
         when {
@@ -215,6 +252,23 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
             a.play(a.sPerfect, 0.5f)
         }
         if (result.lost.isNotEmpty()) a.play(a.sFall, 0.8f)
+        checkMilestones()
+    }
+
+    /** Height milestones (spec §8): the first time ever the tower reaches each one, it pays coins right away. */
+    private fun checkMilestones() {
+        val s = game.settings
+        val reached = GameLogic.milestoneAt(logic.towerHeight)
+        if (reached <= s.bestMilestone) return
+        var coins = 0
+        for (height in GameLogic.milestonesBetween(s.bestMilestone, reached)) coins += GameLogic.milestoneCoins(height)
+        s.bestMilestone = reached
+        s.coins += coins
+        milestoneCoins += coins
+        popups += Popup("NEW MILESTONE REACHED!", ACCENT, 2.4f, sticky = true)
+        popups += Popup("HEIGHT $reached  +$coins COINS", Color.WHITE, 2.4f, sticky = true)
+        a.play(a.sPerfect, 0.8f, 1.3f)
+        a.vibrate(60)
     }
 
     override fun onHeartLost(heartsLeft: Int) {
@@ -254,16 +308,35 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
         }
     }
 
+    /**
+     * Game-over ad continue after a "board not filled" loss: the trailing columns get filler cubes dropped in
+     * (3 levels of grace) and the run carries on. Same placeholder as [watchAd]: the reward is granted immediately.
+     */
+    private fun watchAdContinue() {
+        val cells = logic.reviveGaps() ?: return
+        world.gameOver = false
+        world.fillGaps(cells, GameLogic.FILLER)
+        state = State.PLAYING
+        gameOverTime = 0f
+        popups.clear()
+        popups += Popup("GAPS FILLED!", ACCENT, 1.8f)
+        popups += Popup("${GameLogic.GAP_GRACE} LEVELS OF GRACE", Color.WHITE, 1.8f)
+        a.play(a.sPerfect, 0.7f, 1.2f)
+    }
+
     private fun finishGameOver() {
         state = State.GAME_OVER
         gameOverTime = 0f
         world.gameOver = true
+        layoutGameOver()
         val s = game.settings
+        // A continued run is paid out again at its next game over; only the coins earned since then are new.
         coinsEarned = GameLogic.coinsFor(logic.score) + logic.bonusCoins
-        s.coins += coinsEarned
-        newRecord = logic.score > s.highScore
-        if (newRecord) s.highScore = logic.score
-        if (logic.towerHeight > s.bestHeight) s.bestHeight = logic.towerHeight
+        s.coins += coinsEarned - coinsBanked
+        coinsBanked = coinsEarned
+        newRecord = newRecord || logic.score > highScore
+        if (logic.score > highScore) highScore = logic.score
+        if (logic.towerHeight > bestHeight) bestHeight = logic.towerHeight
         a.play(a.sGameOver, 0.8f)
         a.vibrate(250)
     }
@@ -309,10 +382,25 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
         restartBtn.set(cx, cy - 50f * u, bw, bh)
         settingsBtn.set(cx, cy - 220f * u, bw, bh)
         menuBtn.set(cx, cy - 390f * u, bw, bh)
-        againBtn.set(cx, cy - 290f * u, bw, bh)
-        overMenuBtn.set(cx, cy - 455f * u, bw, bh)
         watchAdBtn.set(cx, cy - 210f * u, bw, bh)
         noThanksBtn.set(cx, cy - 380f * u, bw, bh)
+        layoutGameOver()
+    }
+
+    /** Extra panel height for the continue button at the top of the game-over panel. */
+    private fun continueSpace() = if (logic.canReviveGaps) CONTINUE_SPACE * a.u else 0f
+
+    private fun layoutGameOver() {
+        val u = a.u
+        val bw = 600f * u
+        val bh = 140f * u
+        val cx = (w - bw) / 2f
+        val cy = h / 2f
+        val e = continueSpace() / 2f
+        val cw = 700f * u
+        continueBtn.set((w - cw) / 2f, cy + 250f * u, cw, bh)
+        againBtn.set(cx, cy - 290f * u - e, bw, bh)
+        overMenuBtn.set(cx, cy - 455f * u - e, bw, bh)
     }
 
     override fun render(delta: Float) {
@@ -329,7 +417,9 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
         healFlash = (healFlash - dt * 1.5f).coerceAtLeast(0f)
 
         val showGhost = state == State.PLAYING
-        world.render(logic.current, if (showGhost) logic.ghost() else null, dt, if (showGhost) logic.board.heights() else null)
+        // No Fall has no gap rule, so no warning pillars.
+        val warn = showGhost && !noFall
+        world.render(logic.current, if (showGhost) logic.ghost() else null, dt, if (warn) logic.board.heights() else null)
         preview.render(logic.next)
 
         batch.begin()
@@ -389,7 +479,8 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
 
         // Score (top-center).
         text(batch, a.fontLarge, logic.score.toString(), w / 2f, top - m - 55f * u)
-        text(batch, a.fontSmall, "BEST ${maxOf(game.settings.highScore, logic.score)}", w / 2f, top - m - 140f * u)
+        text(batch, a.fontSmall, "BEST ${maxOf(highScore, logic.score)}", w / 2f, top - m - 140f * u)
+        if (noFall) text(batch, a.fontSmall, "NO FALL", w / 2f, top - m - 200f * u)
 
         // Floating score popups.
         val it = popups.iterator()
@@ -421,7 +512,7 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
     /** Spec §4: warns before a trailing column ends the run. */
     private fun drawGapWarning(u: Float, m: Float) {
         val gap = logic.gap
-        if (state != State.PLAYING || gap < GameLogic.GAP_WARNING) return
+        if (noFall || state != State.PLAYING || gap < GameLogic.GAP_WARNING) return
         val left = GameLogic.GAP_LIMIT + 1 - gap
         val pulse = 0.65f + 0.35f * MathUtils.sin(time * 8f)
         val y = Gdx.graphics.safeInsetBottom + m + (if (game.settings.showButtons) 250f else 70f) * u
@@ -464,20 +555,26 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
         val t = MathUtils.clamp((gameOverTime - OVER_PANEL_DELAY) / 0.35f, 0f, 1f)
         dim(batch, a, w, h, 0.45f * t)
         val pw = 800f * u
-        val ph = 1060f * u
+        // With the continue button, the panel grows: the title moves up and the rest moves down around it.
+        val extra = continueSpace()
+        val e = extra / 2f
+        val ph = 1060f * u + extra
         val slide = (1f - Interpolation.pow3Out.apply(t)) * 200f * u
-        panel(batch, a, (w - pw) / 2f, h / 2f - 520f * u - slide, pw, ph, 0.85f * t)
-        val cy = h / 2f - slide
-        text(batch, a.fontLarge, "GAME OVER", w / 2f, cy + 430f * u)
+        panel(batch, a, (w - pw) / 2f, h / 2f - 520f * u - e - slide, pw, ph, 0.85f * t)
+        val top = h / 2f - slide + e
+        text(batch, a.fontLarge, "GAME OVER", w / 2f, top + 430f * u)
         a.fontSmall.color = DANGER
         val reason = if (logic.gameOverReason == GameOverReason.GAPS) "BOARD NOT FILLED" else "OUT OF HEARTS"
-        text(batch, a.fontSmall, reason, w / 2f, cy + 350f * u)
+        text(batch, a.fontSmall, reason, w / 2f, top + 350f * u)
         a.fontSmall.color = Color.WHITE
+        val cy = h / 2f - slide - e
         text(batch, a.fontSmall, "SCORE", w / 2f, cy + 280f * u)
         text(batch, a.fontTitle, logic.score.toString(), w / 2f, cy + 185f * u)
         text(batch, a.fontMedium, "HEIGHT ${logic.towerHeight}", w / 2f, cy + 80f * u)
         // Coins earned: score / 100.
-        val coinLabel = if (coinsEarned == 1) "+1 COIN" else "+$coinsEarned COINS"
+        // Milestone coins are already in the balance, but count them toward the run's total.
+        val total = coinsEarned + milestoneCoins
+        val coinLabel = if (total == 1) "+1 COIN" else "+$total COINS"
         val cs = 64f * u
         glyphs.setText(a.fontMedium, coinLabel)
         val cw = cs + 14f * u + glyphs.width
@@ -506,6 +603,8 @@ class GameScreen(private val game: StackerGame) : ScreenAdapter(), GameLogic.Lis
 
     companion object {
         const val OVER_PANEL_DELAY = 1.4f
+        /** Game-over panel height added for the continue button (in UI units). */
+        const val CONTINUE_SPACE = 200f
         private val MULTIPLIER_PURPLE: Color = Color.valueOf("B79CFF")
         private val STONE: Color = Color.valueOf("D8CFC4")
         private val MYSTERY_TEAL: Color = Color.valueOf("5FF0E0")

@@ -14,6 +14,8 @@ enum class PieceType(
     val kind: Kind = Kind.NORMAL,
     /** For X pieces: index into [cells] of the X cube. Cell order survives rotation, so this stays valid. */
     val xIndex: Int = -1,
+    /** Regular pieces only: the tower height at which this piece joins the bag (0 = from the start). */
+    val unlockHeight: Int = 0,
 ) {
     SINGLE(0xFFD23F, cells("000")),
     DOMINO(0xFF6B6B, cells("000", "100")),
@@ -23,6 +25,24 @@ enum class PieceType(
     TEE(0xFF9F45, cells("000", "100", "200", "101")),
     PLUS(0x2EC4B6, cells("100", "001", "101", "201", "102")),
     ZIGZAG(0xC0E218, cells("101", "201", "000", "100")),
+
+    // Large pieces (spec §6): harder to fit, they join the bag as the tower climbs.
+    /** 5 cubes: two 3-long arms meeting at a corner. */
+    BIG_CORNER(0xE84A5F, cells("000", "100", "200", "001", "002"), unlockHeight = 10),
+    /** 5 cubes: a U with a gap in the middle of one side. */
+    U_PIECE(0x00A8E8, cells("000", "200", "001", "101", "201"), unlockHeight = 10),
+    /** 6 cubes: a flat 3×2 slab. */
+    SLAB(0x9D4EDD, cells("000", "100", "200", "001", "101", "201"), unlockHeight = 20),
+    /** 6 cubes: a staircase three steps high. */
+    STAIRS(0xF4A261, cells("000", "100", "200", "110", "210", "220"), unlockHeight = 20),
+    /** 5 cubes: two legs with a beam across the top. */
+    ARCH(0x2A9D8F, cells("000", "200", "010", "110", "210"), unlockHeight = 35),
+    /** 5 cubes: a corner with a two-high post at the joint. */
+    POST_CORNER(0xE76F51, cells("000", "100", "001", "010", "020"), unlockHeight = 35),
+    /** 8 cubes: the whole 3×3 board outline with a hole in the middle. */
+    RING(0xFF477E, cells("000", "100", "200", "001", "201", "002", "102", "202"), unlockHeight = 50),
+    /** 8 cubes: a 2×2×2 block. */
+    BIG_CUBE(0x6A994E, cells("000", "100", "001", "101", "010", "110", "011", "111"), unlockHeight = 50),
 
     /** Clears nearby cubes where it lands; never costs a heart. */
     BOMB(0x2E2E3A, cells("000"), Kind.BOMB),
@@ -62,7 +82,14 @@ enum class PieceType(
     fun isX(cellIndex: Int) = cellIndex == xIndex
 
     companion object {
-        val normals = entries.filter { it.kind == Kind.NORMAL }
+        /** The regular pieces available from the start. */
+        val normals = entries.filter { it.kind == Kind.NORMAL && it.unlockHeight == 0 }
+
+        /** The large regular pieces that join the bag as the tower climbs, in unlock order. */
+        val largePieces = entries.filter { it.kind == Kind.NORMAL && it.unlockHeight > 0 }
+
+        /** Every regular piece in the bag once the tower has reached [height]. */
+        fun regularsAt(height: Int) = entries.filter { it.kind == Kind.NORMAL && it.unlockHeight <= height }
         val xPieces = entries.filter { it.kind == Kind.X }
 
         /** Specials that only spawn once bought in the shop; their chances come from the player's upgrade levels. */
@@ -141,6 +168,8 @@ data class PieceSpec(val type: PieceType, val cells: List<Vec3i> = type.cells, v
                     Orientation.extent(all) { it.x } <= MAX_LENGTH && Orientation.extent(all) { it.z } <= MAX_LENGTH
                 }
             }
+            // Some large pieces (the ring) have no free side that stays short enough: the special comes alone.
+            if (spots.isEmpty()) return PieceSpec(special)
             return PieceSpec(base, Orientation.normalize(cells + spots.random(random)), special)
         }
     }
@@ -156,12 +185,20 @@ class Piece(val spec: PieceSpec, var x: Int, var y: Int, var z: Int) {
     fun worldCells(): List<Vec3i> = cells.map { Vec3i(it.x + x, it.y + y, it.z + z) }
 }
 
-/** Shuffled-bag randomizer: every piece type once per bag, in random order. */
+/**
+ * Shuffled-bag randomizer: every piece type once per bag, in random order. Large pieces unlocked by [height]
+ * join from the next bag on.
+ */
 class PieceBag(private val random: kotlin.random.Random) {
     private val bag = ArrayDeque<PieceType>()
 
-    fun next(): PieceType {
-        if (bag.isEmpty()) bag.addAll(PieceType.normals.shuffled(random))
+    fun next(height: Int = 0): PieceType {
+        if (bag.isEmpty()) bag.addAll(PieceType.regularsAt(height).shuffled(random))
         return bag.removeFirst()
+    }
+
+    /** Newly unlocked pieces join the current bag at random spots, so they show up right away. */
+    fun unlock(types: List<PieceType>) {
+        for (t in types) bag.add(random.nextInt(bag.size + 1), t)
     }
 }

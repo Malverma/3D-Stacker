@@ -13,6 +13,8 @@ class GameLogicTest {
         var heartsLost = 0
         var gameOver: GameOverReason? = null
         var heartsGained = 0
+        val unlocks = ArrayList<List<PieceType>>()
+        override fun onPiecesUnlocked(types: List<PieceType>) { unlocks += types }
         override fun onHeartGained(hearts: Int) { heartsGained++ }
         override fun onLanded(result: LandingResult) { landings += result }
         override fun onHeartLost(heartsLeft: Int) { heartsLost++ }
@@ -214,15 +216,63 @@ class GameLogicTest {
     }
 
     @Test
-    fun `game is lost when a cell falls more than 10 levels behind`() {
+    fun `game is lost when a cell falls 10 levels behind`() {
         val bar = listOf(v(0, 0, 0), v(0, 1, 0), v(0, 2, 0))
-        repeat(3) { drop(bar, 0, 0) } // 9 tall, other cells empty
+        repeat(3) { drop(bar, 0, 0) } // 9 tall, other cells empty: still allowed
         assertNull(rec.gameOver)
-        single(0, 0) // 10 tall: still allowed
-        assertNull(rec.gameOver)
-        single(0, 0) // 11 tall with empty cells: lost
+        single(0, 0) // 10 tall with empty cells: lost
         assertEquals(GameOverReason.GAPS, rec.gameOver)
         assertEquals(3, logic.hearts)
+    }
+
+    @Test
+    fun `gap continue fills trailing columns to 3 levels of grace, once per run`() {
+        val bar = listOf(v(0, 0, 0), v(0, 1, 0), v(0, 2, 0))
+        repeat(3) { drop(bar, 0, 0) }
+        single(0, 0) // 10 tall, the rest empty
+        assertFalse(logic.revive()) // the hearts revive doesn't apply
+        assertTrue(logic.canReviveGaps)
+        val added = logic.reviveGaps()!!
+        assertFalse(logic.isGameOver)
+        assertEquals(8 * 3, added.size)
+        assertEquals(GameLogic.GAP_LIMIT + 1 - GameLogic.GAP_GRACE, logic.gap)
+        assertEquals(10, logic.board.height(0, 0))
+        // Bottom-up within each column.
+        assertEquals(listOf(0, 1, 2), added.filter { it.x == 1 && it.z == 0 }.map { it.y })
+        drop(bar, 0, 0) // 13 vs 3: gap 10 again
+        assertTrue(logic.isGameOver)
+        assertFalse(logic.canReviveGaps)
+        assertNull(logic.reviveGaps())
+    }
+
+    @Test
+    fun `large pieces join the bag only once the tower is tall enough`() {
+        val bag = PieceBag(Random(5))
+        repeat(200) { assertTrue(bag.next(0).unlockHeight == 0) }
+        val seen = HashSet<PieceType>()
+        repeat(400) { seen += bag.next(50).also { assertTrue(it.unlockHeight <= 50) } }
+        assertTrue(seen.containsAll(PieceType.largePieces))
+        for (t in PieceType.largePieces) for (axis in listOf<(Vec3i) -> Int>({ it.x }, { it.y }, { it.z })) {
+            assertTrue(Orientation.extent(t.cells, axis) <= PieceSpec.MAX_LENGTH, "$t")
+        }
+    }
+
+    @Test
+    fun `reaching height 10 unlocks the first large pieces`() {
+        fillLevel(9)
+        assertTrue(rec.unlocks.isEmpty())
+        fillLevel(10)
+        assertEquals(listOf(listOf(PieceType.BIG_CORNER, PieceType.U_PIECE)), rec.unlocks)
+    }
+
+    @Test
+    fun `height milestones come every 10 layers and pay more each time`() {
+        assertEquals(0, GameLogic.milestoneAt(9))
+        assertEquals(20, GameLogic.milestoneAt(27))
+        assertEquals(listOf(10, 20, 30), GameLogic.milestonesBetween(0, 30))
+        assertEquals(listOf(30), GameLogic.milestonesBetween(20, 34))
+        assertEquals(emptyList(), GameLogic.milestonesBetween(30, 30))
+        assertEquals(listOf(25, 50, 75, 250), listOf(10, 20, 30, 100).map(GameLogic::milestoneCoins))
     }
 
     @Test
@@ -391,7 +441,7 @@ class GameLogicTest {
     @Test
     fun `attached specials sit beside a regular piece and are never 4 long`() {
         val random = Random(4)
-        for (base in PieceType.normals) for (special in PieceType.unlockables) repeat(20) {
+        for (base in PieceType.regularsAt(Int.MAX_VALUE)) for (special in PieceType.unlockables) repeat(20) {
             val spec = PieceSpec.attached(base, special, random)
             assertEquals(base.cells.size + 1, spec.cells.size)
             assertEquals(spec.cells.size, spec.cells.toSet().size, "no overlapping cubes")
@@ -511,5 +561,48 @@ class GameLogicTest {
         assertEquals(12, GameLogic.coinsFor(1200))
         assertEquals(12, GameLogic.coinsFor(1299))
         assertEquals(0, GameLogic.coinsFor(99))
+    }
+
+    @Test
+    fun `no fall mode grows the board instead of dropping overhanging cubes`() {
+        logic.noFall = true
+        drop(listOf(v(0, 0, 0), v(1, 0, 0)), 2, 0) // second cube hangs over x = 3
+        val r = rec.landings.last()
+        assertTrue(r.lost.isEmpty())
+        assertEquals(listOf(v(3, 0, 0)), r.grown)
+        assertTrue(logic.board.inside(3, 0))
+        assertEquals(1, logic.board.height(3, 0))
+        assertEquals(3, logic.hearts)
+        // The new cell holds up the next piece like any other.
+        drop(listOf(v(0, 0, 0)), 3, 0)
+        assertEquals(2, logic.board.height(3, 0))
+    }
+
+    @Test
+    fun `no fall mode grows below zero and the preview shows it`() {
+        logic.noFall = true
+        awaitPiece()
+        val p = logic.previewDrop(Orientation.normalize(listOf(v(0, 0, 0), v(1, 0, 0))), -1, 0)!!
+        assertEquals(0, p.lostCount)
+        assertTrue(p.onBoard.all { it })
+        drop(listOf(v(0, 0, 0), v(1, 0, 0)), -1, 0)
+        assertTrue(logic.board.inside(-1, 0))
+        assertEquals(1, logic.board.height(-1, 0))
+        assertEquals(-1, logic.board.minX)
+    }
+
+    @Test
+    fun `no fall mode has no gap rule`() {
+        logic.noFall = true
+        val bar = listOf(v(0, 0, 0), v(0, 1, 0), v(0, 2, 0))
+        repeat(4) { drop(bar, 0, 0) }
+        assertNull(rec.gameOver)
+    }
+
+    @Test
+    fun `classic mode still drops overhanging cubes`() {
+        drop(listOf(v(0, 0, 0), v(1, 0, 0)), 2, 0)
+        assertEquals(1, rec.landings.last().lost.size)
+        assertFalse(logic.board.inside(3, 0))
     }
 }

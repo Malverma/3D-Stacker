@@ -8,6 +8,7 @@ import com.badlogic.gdx.math.MathUtils
 import com.badlogic.gdx.utils.Disposable
 import com.stacker3d.shop.Catalog
 import com.stacker3d.shop.SkyTheme
+import kotlin.math.min
 import kotlin.random.Random
 
 /** Height-driven gradient sky (spec §7): day → afternoon → sunset → dusk → night → space. */
@@ -19,6 +20,7 @@ class Sky(theme: SkyTheme = Catalog.classicSky) : Disposable {
 
     private var keys = emptyList<Key>()
     private var starsFrom = 55f
+    private var sunGlow = false
 
     /** The equipped background scheme (shop "Backgrounds" tab). */
     var theme: SkyTheme = theme
@@ -26,6 +28,7 @@ class Sky(theme: SkyTheme = Catalog.classicSky) : Disposable {
             field = value
             keys = value.keys.map { Key(it.height, it.top, it.bottom) }
             starsFrom = value.starsFrom
+            sunGlow = value.sunGlow
         }
 
     init {
@@ -38,6 +41,7 @@ class Sky(theme: SkyTheme = Catalog.classicSky) : Disposable {
     private val stars = Array(140) { floatArrayOf(Random.nextFloat(), Random.nextFloat(), Random.nextFloat()) }
     private var time = 0f
 
+
     fun render(width: Float, height: Float, towerHeight: Float, dt: Float) {
         time += dt
         colorsAt(towerHeight)
@@ -46,6 +50,7 @@ class Sky(theme: SkyTheme = Catalog.classicSky) : Disposable {
         Gdx.gl.glBlendFunc(GL20.GL_SRC_ALPHA, GL20.GL_ONE_MINUS_SRC_ALPHA)
         shapes.begin(ShapeRenderer.ShapeType.Filled)
         shapes.rect(0f, 0f, width, height, bottom, bottom, top, top)
+        if (sunGlow) renderSun(width, height, towerHeight)
 
         val starAlpha = MathUtils.clamp((towerHeight - starsFrom) / 20f, 0f, 1f)
         if (starAlpha > 0f) {
@@ -57,6 +62,22 @@ class Sky(theme: SkyTheme = Catalog.classicSky) : Disposable {
             }
         }
         shapes.end()
+    }
+
+    /** Soft sun glow for the daytime sky; it fades out into the sunset as the tower climbs. */
+    private fun renderSun(width: Float, height: Float, towerHeight: Float) {
+        val fade = MathUtils.clamp(1f - (towerHeight - 20f) / 25f, 0f, 1f)
+        if (fade <= 0f) return
+        val unit = min(width, height)
+
+        // Soft sun glow in the upper right: faint warm-white discs stacked so the middle glows brightest.
+        val sx = width * 0.82f
+        val sy = height * 0.9f
+        for (i in SUN_RINGS downTo 0) {
+            val t = i / SUN_RINGS.toFloat()
+            shapes.setColor(1f, 0.98f, 0.85f, fade * (0.012f + 0.05f * (1f - t) * (1f - t)))
+            shapes.circle(sx, sy, unit * (0.05f + 0.32f * t), 64)
+        }
     }
 
     private fun colorsAt(h: Float) {
@@ -78,4 +99,8 @@ class Sky(theme: SkyTheme = Catalog.classicSky) : Disposable {
     }
 
     override fun dispose() = shapes.dispose()
+
+    companion object {
+        const val SUN_RINGS = 24
+    }
 }

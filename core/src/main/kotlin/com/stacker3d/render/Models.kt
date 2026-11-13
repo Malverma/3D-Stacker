@@ -23,7 +23,7 @@ import com.stacker3d.shop.Catalog
 private val pieceColors = PieceType.entries.map { Color(it.rgb shl 8 or 0xFF) }
 val PieceType.color: Color get() = pieceColors[ordinal]
 
-const val CUBE_SIZE = 0.94f
+const val CUBE_SIZE = 0.97f
 private const val ATTRS = (Usage.Position or Usage.Normal).toLong()
 
 fun lightEnvironment() = Environment().apply {
@@ -91,25 +91,58 @@ class Models : Disposable {
 
     val board: Model = run {
         builder.begin()
-        val base = builder.part("base", GL20.GL_TRIANGLES, ATTRS, Material(ColorAttribute.createDiffuse(Color.valueOf("1B2A4A"))))
-        BoxShapeBuilder.build(base, 0f, -0.31f, 0f, 3.36f, 0.5f, 3.36f)
-        val tiles = builder.part("tiles", GL20.GL_TRIANGLES, ATTRS, Material(ColorAttribute.createDiffuse(Color.valueOf("E9F4FF"))))
-        for (x in 0..2) for (z in 0..2) BoxShapeBuilder.build(tiles, x - 1f, -0.04f, z - 1f, 0.92f, 0.08f, 0.92f)
+        val base = builder.part("base", GL20.GL_TRIANGLES, ATTRS, Material(ColorAttribute.createDiffuse(Color.valueOf("2B3A67"))))
+        BoxShapeBuilder.build(base, 0f, -0.27f, 0f, 3.36f, 0.42f, 3.36f)
+        val tiles = builder.part("tiles", GL20.GL_TRIANGLES, ATTRS, Material(ColorAttribute.createDiffuse(Color.valueOf("F2F6FC"))))
+        val tilesAlt = builder.part("tilesAlt", GL20.GL_TRIANGLES, ATTRS, Material(ColorAttribute.createDiffuse(Color.valueOf("DCE5F2"))))
+        for (x in 0..2) for (z in 0..2) {
+            BoxShapeBuilder.build(if ((x + z) % 2 == 0) tiles else tilesAlt, x - 1f, -0.04f, z - 1f, 0.96f, 0.08f, 0.96f)
+        }
         // Raised frame along the slab's top edge, just outside the tiles.
-        val rim = builder.part("rim", GL20.GL_TRIANGLES, ATTRS, Material(ColorAttribute.createDiffuse(Color.valueOf("FFD23F"))))
+        val rim = builder.part("rim", GL20.GL_TRIANGLES, ATTRS, Material(ColorAttribute.createDiffuse(Color.valueOf("5B7CFA"))))
         BoxShapeBuilder.build(rim, 0f, -0.01f, 1.6f, 3.36f, 0.1f, 0.16f)
         BoxShapeBuilder.build(rim, 0f, -0.01f, -1.6f, 3.36f, 0.1f, 0.16f)
         BoxShapeBuilder.build(rim, 1.6f, -0.01f, 0f, 0.16f, 0.1f, 3.04f)
         BoxShapeBuilder.build(rim, -1.6f, -0.01f, 0f, 0.16f, 0.1f, 3.04f)
+        // Wider, darker foot under the slab so the board reads as a solid plinth.
+        val foot = builder.part("foot", GL20.GL_TRIANGLES, ATTRS, Material(ColorAttribute.createDiffuse(Color.valueOf("1A2442"))))
+        BoxShapeBuilder.build(foot, 0f, -0.62f, 0f, 3.56f, 0.28f, 3.56f)
         builder.end()
     }
 
-    /** Paints a [board] instance (materials: base, tiles, rim) in the equipped skin's board colors. */
-    fun paintBoard(instance: ModelInstance) {
+    /** One cell of a grown board (No Fall mode), centered on its cube: materials base, tile, foot. */
+    val boardTile: Model = run {
+        builder.begin()
+        val base = builder.part("base", GL20.GL_TRIANGLES, ATTRS, Material(ColorAttribute.createDiffuse(Color.valueOf("2B3A67"))))
+        BoxShapeBuilder.build(base, 0f, -0.27f, 0f, 1f, 0.42f, 1f)
+        val tile = builder.part("tile", GL20.GL_TRIANGLES, ATTRS, Material(ColorAttribute.createDiffuse(Color.valueOf("F2F6FC"))))
+        BoxShapeBuilder.build(tile, 0f, -0.04f, 0f, 0.96f, 0.08f, 0.96f)
+        val foot = builder.part("foot", GL20.GL_TRIANGLES, ATTRS, Material(ColorAttribute.createDiffuse(Color.valueOf("1A2442"))))
+        BoxShapeBuilder.build(foot, 0f, -0.62f, 0f, 1.06f, 0.28f, 1.06f)
+        builder.end()
+    }
+
+    /** Paints a [boardTile] instance in the equipped skin's board colors; [alt] is the darker checker tile. */
+    fun paintTile(instance: ModelInstance, alt: Boolean) {
         val style = skin.board
-        listOf(style.base, style.tiles, style.rim).forEachIndexed { i, rgb ->
+        val tile = if (alt) shade(style.tiles, 0.92f) else style.tiles
+        listOf(style.base, tile, shade(style.base, 0.65f)).forEachIndexed { i, rgb ->
             (instance.materials[i].get(ColorAttribute.Diffuse) as ColorAttribute).color.set(rgb shl 8 or 0xFF)
         }
+    }
+
+    /** Paints a [board] instance (materials: base, tiles, tilesAlt, rim, foot) in the equipped skin's board colors. */
+    fun paintBoard(instance: ModelInstance) {
+        val style = skin.board
+        listOf(style.base, style.tiles, shade(style.tiles, 0.92f), style.rim, shade(style.base, 0.65f)).forEachIndexed { i, rgb ->
+            (instance.materials[i].get(ColorAttribute.Diffuse) as ColorAttribute).color.set(rgb shl 8 or 0xFF)
+        }
+    }
+
+    /** Scales each channel of 0xRRGGBB by [f]. */
+    private fun shade(rgb: Int, f: Float): Int {
+        fun ch(shift: Int) = ((rgb shr shift and 0xFF) * f).toInt().coerceIn(0, 255) shl shift
+        return ch(16) or ch(8) or ch(0)
     }
 
     private fun texturedCube(path: String): Model {
@@ -143,7 +176,7 @@ class Models : Disposable {
 
     override fun dispose() {
         skinModels.dispose()
-        listOf(cube, bomb, xBlock, heartBlock, goldBlock, multiplierBlock, crackedBlock, mysteryBlock, ghost, pillar, board)
+        listOf(cube, bomb, xBlock, heartBlock, goldBlock, multiplierBlock, crackedBlock, mysteryBlock, ghost, pillar, board, boardTile)
             .forEach { it.dispose() }
         textures.forEach { it.dispose() }
     }

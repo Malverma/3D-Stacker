@@ -8,7 +8,7 @@ import com.stacker3d.StackerGame
 /**
  * Desktop build for quick testing. Environment variables:
  *  STACKER_AUTOPLAY=1, STACKER_CHAOS=1 (random placements), STACKER_IMMORTAL=1, STACKER_DELAY=<seconds per piece>,
- *  STACKER_START=menu|game|paused|settings|shop_backgrounds|shop_blocks|shop_specials, STACKER_SHOTS=<file prefix>, STACKER_SHOT_TIMES=2,5,9,
+ *  STACKER_START=menu|game|nofall|paused|settings|shop_backgrounds|shop_blocks|shop_specials, STACKER_SHOTS=<file prefix>, STACKER_SHOT_TIMES=2,5,9,
  *  STACKER_SPECIALS=<chance> (every shop special spawns at this chance, owned or not), STACKER_SKIN=<block skin id>
  */
 fun main() {

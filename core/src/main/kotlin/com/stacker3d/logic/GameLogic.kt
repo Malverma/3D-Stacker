@@ -47,6 +47,8 @@ data class LandingResult(
      * and every cube above it drops one layer before the next one breaks.
      */
     val crumbled: List<Vec3i> = emptyList(),
+    /** No Fall mode: cells (y = 0) that joined the board because a cube of this piece hung over them. */
+    val grown: List<Vec3i> = emptyList(),
 )
 
 /** What a Mystery Block can turn into when it lands on the board. */
@@ -83,6 +85,8 @@ class GameLogic(
         fun onHeartLost(heartsLeft: Int) {}
         fun onHeartGained(hearts: Int) {}
         fun onGameOver(reason: GameOverReason) {}
+        /** The tower reached a new height tier and these large pieces joined the bag. */
+        fun onPiecesUnlocked(types: List<PieceType>) {}
     }
 
     val board = Board()
@@ -103,6 +107,12 @@ class GameLogic(
     /** Debug/autoplay only: hearts are never lost. */
     var immortal = false
 
+    /**
+     * No Fall mode: cubes hanging off the edge of a piece that has at least one cube on the board don't fall away;
+     * their cells join the board and they settle there. The gap rule is off, since new cells start empty.
+     */
+    var noFall = false
+
     /** Chance per spawn of each shop special ([PieceType.unlockables]); missing types never spawn. */
     var specialChances: Map<PieceType, Float> = emptyMap()
 
@@ -115,6 +125,12 @@ class GameLogic(
 
     /** The one ad-revive per run has been used. */
     var revived = false; private set
+
+    /** The one ad-continue per run after a "board not filled" loss has been used. */
+    var gapRevived = false; private set
+
+    /** A "board not filled" loss can still be undone by watching an ad. */
+    val canReviveGaps: Boolean get() = isGameOver && gameOverReason == GameOverReason.GAPS && !gapRevived
 
     private var fallTimer = 0f
     private var spawnTimer = 0f
@@ -138,6 +154,7 @@ class GameLogic(
         isGameOver = false
         gameOverReason = null
         revived = false
+        gapRevived = false
         current = null
         spawnTimer = 0f
         spawn()
@@ -179,6 +196,9 @@ class GameLogic(
     }
 
     // ---- queries --------------------------------------------------------------------------
+
+    /** Cube at (x, z) of a landing piece stacks there: on the board, or (No Fall) on a cell the board can grow into. */
+    private fun stacksAt(x: Int, z: Int) = board.inside(x, z) || (noFall && board.canGrow(x, z))
 
     /** True if the cells can occupy this spot: at least one cube over the board and none inside a column. */
     fun fits(cells: List<Vec3i>, x: Int, y: Int, z: Int): Boolean {
@@ -222,8 +242,8 @@ class GameLogic(
                 xOnBoard = board.inside(wx, wz)
                 out[i] = Vec3i(wx, c.y + y, wz)
                 onBoard[i] = xOnBoard
-            } else if (board.inside(wx, wz)) {
-                val col = wx + wz * Board.SIZE
+            } else if (stacksAt(wx, wz)) {
+                val col = Board.index(wx, wz)
                 out[i] = Vec3i(wx, heights[col], wz)
                 heights[col]++
                 onBoard[i] = true
@@ -247,8 +267,11 @@ class GameLogic(
 
     private fun spawnAs(spec: PieceSpec) {
         val cells = spec.cells
-        val x = (1f - (Orientation.extent(cells) { it.x } - 1) / 2f).roundToInt()
-        val z = (1f - (Orientation.extent(cells) { it.z } - 1) / 2f).roundToInt()
+        // Centered over the board (which No Fall mode can grow lopsided).
+        val cx = (board.minX + board.maxX) / 2f
+        val cz = (board.minZ + board.maxZ) / 2f
+        val x = (cx - (Orientation.extent(cells) { it.x } - 1) / 2f).roundToInt()
+        val z = (cz - (Orientation.extent(cells) { it.z } - 1) / 2f).roundToInt()
         val piece = Piece(spec, x, towerHeight + SPAWN_GAP, z)
         current = piece
         fallTimer = 0f
@@ -264,7 +287,7 @@ class GameLogic(
                 val chance = specialChances[type] ?: continue
                 if (r < chance) {
                     // Half the time the special cube comes attached to a regular piece from the bag.
-                    return if (random.nextFloat() < ATTACH_CHANCE) PieceSpec.attached(bag.next(), type, random) else PieceSpec(type)
+                    return if (random.nextFloat() < ATTACH_CHANCE) PieceSpec.attached(bag.next(peakHeight), type, random) else PieceSpec(type)
                 }
                 r -= chance
             }
@@ -272,7 +295,7 @@ class GameLogic(
             r -= BOMB_CHANCE
             if (r < X_CHANCE) return PieceSpec(PieceType.xPieces.random(random))
         }
-        return PieceSpec(bag.next())
+        return PieceSpec(bag.next(peakHeight))
     }
 
     private fun stepDown() {
@@ -311,6 +334,7 @@ class GameLogic(
         spawnTimer = SPAWN_DELAY
         landedCount++
         val origin = Vec3i(p.x, p.y, p.z)
+        val oldPeak = peakHeight
         val base = when (p.type.kind) {
             PieceType.Kind.BOMB -> explode(p, origin)
             PieceType.Kind.X -> placeX(p, origin)
@@ -323,6 +347,11 @@ class GameLogic(
         towerHeight = board.maxHeight()
         score += result.points
         listener.onLanded(result)
+        val unlocked = PieceType.largePieces.filter { it.unlockHeight in oldPeak + 1..peakHeight }
+        if (unlocked.isNotEmpty()) {
+            bag.unlock(unlocked)
+            listener.onPiecesUnlocked(unlocked)
+        }
         if (result.healed) {
             hearts++
             listener.onHeartGained(hearts)
@@ -339,7 +368,7 @@ class GameLogic(
                 return
             }
         }
-        if (gap > GAP_LIMIT) endGame(GameOverReason.GAPS)
+        if (!noFall && gap > GAP_LIMIT) endGame(GameOverReason.GAPS)
     }
 
     /** Ad reward: after running out of hearts, continue once with a single heart. */
@@ -352,6 +381,31 @@ class GameLogic(
         current = null
         spawnTimer = SPAWN_DELAY
         return true
+    }
+
+    /**
+     * Ad reward after a "board not filled" loss: every column within [GAP_GRACE] levels of losing is topped up with
+     * filler cubes until it trails the tallest column by exactly that grace, then play continues (once per run).
+     * Returns the added cells, bottom-up within each column, or null if the continue isn't available.
+     */
+    fun reviveGaps(): List<Vec3i>? {
+        if (!canReviveGaps) return null
+        gapRevived = true
+        isGameOver = false
+        gameOverReason = null
+        val target = board.maxHeight() - (GAP_LIMIT + 1 - GAP_GRACE)
+        val added = ArrayList<Vec3i>()
+        for (i in board.cells) {
+            val x = Board.xOf(i)
+            val z = Board.zOf(i)
+            while (board.height(x, z) < target) {
+                val y = board.push(x, z, FILLER)
+                added += Vec3i(x, y, z)
+            }
+        }
+        current = null
+        spawnTimer = REFILL_DELAY
+        return added
     }
 
     private fun endGame(reason: GameOverReason) {
@@ -369,7 +423,7 @@ class GameLogic(
     private fun place(p: Piece, origin: Vec3i): LandingResult {
         val world = p.worldCells()
         val mysteryIndex = world.indices.firstOrNull {
-            p.cellType(it).kind == PieceType.Kind.MYSTERY && board.inside(world[it].x, world[it].z)
+            p.cellType(it).kind == PieceType.Kind.MYSTERY && stacksAt(world[it].x, world[it].z)
         } ?: -1
         val effect = if (mysteryIndex >= 0) rollMystery() else null
 
@@ -379,9 +433,11 @@ class GameLogic(
         var gain = 0
         var bonus = 0
         var heart = false
+        val grown = ArrayList<Vec3i>()
         for (i in world.indices.sortedBy { world[it].y }) {
             if (p.type.isX(i)) continue
             val c = world[i]
+            if (noFall && board.grow(c.x, c.z)) grown += Vec3i(c.x, 0, c.z)
             val fromMystery = i == mysteryIndex
             val type = if (!fromMystery) p.cellType(i) else when (effect!!) {
                 MysteryEffect.GOLD_RUSH -> PieceType.GOLD
@@ -412,7 +468,7 @@ class GameLogic(
         points += newLayerPoints()
         val r = LandingResult(
             p.type, origin, placed, lost, perfect, points,
-            healed = heart && hearts < MAX_HEARTS, coins = coins, multiplierGain = gain, mystery = effect,
+            healed = heart && hearts < MAX_HEARTS, coins = coins, multiplierGain = gain, mystery = effect, grown = grown,
         )
         if (mysteryIndex < 0) return r
         val cell = world[mysteryIndex]
@@ -442,8 +498,10 @@ class GameLogic(
     }
 
     private fun crackedCubes() = sequence {
-        for (x in 0 until Board.SIZE) for (z in 0 until Board.SIZE) for (y in 0 until board.height(x, z)) {
-            if (board.fuseAt(x, y, z) > 0) yield(Vec3i(x, y, z))
+        for (i in board.cells) {
+            val x = Board.xOf(i)
+            val z = Board.zOf(i)
+            for (y in 0 until board.height(x, z)) if (board.fuseAt(x, y, z) > 0) yield(Vec3i(x, y, z))
         }
     }
 
@@ -522,7 +580,7 @@ class GameLogic(
         const val START_FALL_INTERVAL = 1.0f
         const val MIN_FALL_INTERVAL = 0.25f
         /** Fall interval is multiplied by this for every [SPEEDUP_EVERY_POINTS] points (applied continuously). */
-        const val SPEEDUP = 0.98f
+        const val SPEEDUP = 0.975f
         const val SPEEDUP_EVERY_POINTS = 250f
         const val POINTS_PER_CUBE = 10
         const val POINTS_PER_NEW_LAYER = 50
@@ -530,10 +588,31 @@ class GameLogic(
         const val POINTS_PER_CLEARED = 15
         const val DODGE_BONUS = 25
 
-        /** Lose if the lowest column trails the tallest by more than this many levels. */
-        const val GAP_LIMIT = 10
+        /** Lose if the lowest column trails the tallest by more than this many levels (10 behind loses). */
+        const val GAP_LIMIT = 9
         /** Start warning the player when the gap reaches this. */
-        const val GAP_WARNING = 7
+        const val GAP_WARNING = 6
+        /** Ad continue after a gap loss: trailing columns are filled until they're this many levels from losing. */
+        const val GAP_GRACE = 3
+        /** Block type the gap-continue fills with. */
+        val FILLER = PieceType.SINGLE
+        /** Spawn delay after the gap-continue, so the filler cubes can drop in first. */
+        const val REFILL_DELAY = 1.3f
+
+        /** A height milestone every this many layers (spec §8). */
+        const val MILESTONE_EVERY = 10
+        /** Milestone N (height N × [MILESTONE_EVERY]) pays N × this many coins. */
+        const val MILESTONE_COINS_STEP = 25
+
+        /** The highest milestone height at or below [height] (0 if none). */
+        fun milestoneAt(height: Int) = height / MILESTONE_EVERY * MILESTONE_EVERY
+
+        /** Milestone heights above [from] up to and including [to]. */
+        fun milestonesBetween(from: Int, to: Int) =
+            (milestoneAt(from) + MILESTONE_EVERY..to step MILESTONE_EVERY).toList()
+
+        /** Coins for reaching the milestone at [height] for the first time: 25, 50, 75 … */
+        fun milestoneCoins(height: Int) = height / MILESTONE_EVERY * MILESTONE_COINS_STEP
 
         const val SPECIALS_AFTER = 4
         const val BOMB_CHANCE = 0.05f

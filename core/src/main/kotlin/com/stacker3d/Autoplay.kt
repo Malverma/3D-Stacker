@@ -1,5 +1,6 @@
 package com.stacker3d
 
+import com.stacker3d.logic.Board
 import com.stacker3d.logic.GameLogic
 import com.stacker3d.logic.Orientation
 import com.stacker3d.logic.PieceType
@@ -40,8 +41,8 @@ class Autoplay(
             PieceType.Kind.BOMB -> if (!chaos) {
                 // Blow up the tallest column to keep the tower level.
                 val h = logic.board.heights()
-                val col = h.indices.maxBy { h[it] }
-                logic.debugPlace(piece.cells, col % 3, col / 3)
+                val col = logic.board.cells.maxBy { h[it] }
+                logic.debugPlace(piece.cells, Board.xOf(col), Board.zOf(col))
                 return
             }
             else -> Unit
@@ -59,16 +60,25 @@ class Autoplay(
         }
         var best: Triple<List<Vec3i>, Int, Int>? = null
         var bestScore = Float.MAX_VALUE
-        for (cells in orientations) for (x in -2..3) for (z in -2..3) {
+        val b = logic.board
+        for (cells in orientations) for (x in b.minX - 2..b.maxX + 1) for (z in b.minZ - 2..b.maxZ + 1) {
             if (!logic.fits(cells, x, piece.y, z)) continue
             val r = logic.previewDrop(cells, x, z, piece.type.xIndex) ?: continue
             val score = if (chaos) random.nextFloat() else (r.lostCount + if (r.xOnBoard) 1 else 0) * 1000f +
-                (r.heightsAfter.max() - r.heightsAfter.min()) * 4f + r.heightsAfter.max() + random.nextFloat()
+                spread(r.heightsAfter) * 4f + b.cells.maxOf { r.heightsAfter[it] } + random.nextFloat()
             if (score < bestScore) {
                 bestScore = score
                 best = Triple(cells, x, z)
             }
         }
         best?.let { (cells, x, z) -> logic.debugPlace(cells, x, z) }
+    }
+
+    /** Tallest minus shortest column over the board cells (cells it would grow are part of it too). */
+    private fun spread(h: IntArray): Int {
+        var lo = Int.MAX_VALUE
+        var hi = 0
+        for (i in logic.board.cells) { lo = minOf(lo, h[i]); hi = maxOf(hi, h[i]) }
+        return hi - lo
     }
 }

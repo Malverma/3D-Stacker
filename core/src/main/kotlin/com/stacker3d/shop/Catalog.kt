@@ -2,8 +2,11 @@ package com.stacker3d.shop
 
 import com.stacker3d.logic.PieceType
 
-/** A background color scheme: gradient keys by tower height, plus when stars fade in. */
-class SkyTheme(val id: String, val name: String, val keys: List<SkyKey>, val starsFrom: Float)
+/**
+ * A background color scheme: gradient keys by tower height, plus when stars fade in. [sunGlow] adds a
+ * soft sun that fades out as the sky darkens.
+ */
+class SkyTheme(val id: String, val name: String, val keys: List<SkyKey>, val starsFrom: Float, val sunGlow: Boolean = false)
 
 /** Sky gradient at a tower height, colors as 0xRRGGBB. */
 class SkyKey(val height: Float, val top: Int, val bottom: Int)
@@ -38,7 +41,7 @@ class BlockSkin(
     val landSound: String? = null,
     val landPitch: Float = 1f,
     /** The board the tower starts on. */
-    val board: BoardStyle = BoardStyle(0xE9F4FF, 0x1B2A4A, 0xFFD23F),
+    val board: BoardStyle = BoardStyle(0xF2F6FC, 0x2B3A67, 0x5B7CFA),
 )
 
 /** A look for one plain block of a fancy skin; a skin mixes several. */
@@ -109,6 +112,7 @@ object Catalog {
             SkyKey(100f, 0x000000, 0x06060F),
         ),
         starsFrom = 55f,
+        sunGlow = true,
     )
 
     /** Example paid theme: synthwave pinks and purples under a starry sky from the start. */
@@ -125,15 +129,59 @@ object Catalog {
         starsFrom = -20f,
     )
 
-    val skies = listOf(classicSky, neonSky)
+    /** Warm desert evening: sandy gold fading through burnt orange into a deep violet night. */
+    val duneSky = SkyTheme(
+        "bg_dune", "DESERT DUSK",
+        listOf(
+            SkyKey(0f, 0xF2A65A, 0xFFE0A3),
+            SkyKey(15f, 0xE76F51, 0xF4A261),
+            SkyKey(30f, 0xB5446E, 0xF28482),
+            SkyKey(50f, 0x4A1E5C, 0x9D4E7A),
+            SkyKey(75f, 0x1A0B2E, 0x3A1C47),
+            SkyKey(100f, 0x05020C, 0x120818),
+        ),
+        starsFrom = 45f,
+        sunGlow = true,
+    )
+
+    /** Polar night: teal and green aurora bands over a dark sky, stars almost from the start. */
+    val auroraSky = SkyTheme(
+        "bg_aurora", "AURORA",
+        listOf(
+            SkyKey(0f, 0x0B2A3C, 0x1FD1A0),
+            SkyKey(15f, 0x0A2340, 0x38F2C2),
+            SkyKey(30f, 0x14174A, 0x5BE37D),
+            SkyKey(50f, 0x1A0F45, 0x7A5CFF),
+            SkyKey(75f, 0x060A24, 0x153A4A),
+            SkyKey(100f, 0x000000, 0x040A12),
+        ),
+        starsFrom = 5f,
+    )
+
+    /** Soft pastel daydream: cotton-candy pinks and lavenders that drift into a dreamy lilac night. */
+    val candySky = SkyTheme(
+        "bg_candy", "COTTON CANDY",
+        listOf(
+            SkyKey(0f, 0xA0D8FF, 0xFFD6EC),
+            SkyKey(15f, 0xC3B5FF, 0xFFC2E2),
+            SkyKey(30f, 0xFF9FD0, 0xFFE3B3),
+            SkyKey(50f, 0x8E7BEF, 0xF3A6E0),
+            SkyKey(75f, 0x3B2C7A, 0x7C5BB8),
+            SkyKey(100f, 0x120C2E, 0x2A1A52),
+        ),
+        starsFrom = 60f,
+        sunGlow = true,
+    )
+
+    val skies = listOf(classicSky, neonSky, duneSky, auroraSky, candySky)
 
     val skins = listOf(
         BlockSkin("skin_classic", "CLASSIC MIX", null, price = 0),
         BlockSkin("skin_ruby", "RUBY", 0xE63946, board = BoardStyle(0xF7DADD, 0x3D0A12, 0xE63946)),
         BlockSkin("skin_gold", "GOLD", 0xFFC93C, board = BoardStyle(0xFFF6D6, 0x3B2A0A, 0xD4A017)),
-        BlockSkin("skin_mint", "MINT", 0x3DDC97, board = BoardStyle(0xE2FAEE, 0x0D3B2C, 0x3DDC97)),
+        // Id kept from the old Mint skin so players who bought it keep it.
+        BlockSkin("skin_mint", "EMERALD", 0x138A4E, board = BoardStyle(0xCFEBD9, 0x082A1A, 0x1FA463)),
         BlockSkin("skin_ocean", "OCEAN", 0x2F80ED, board = BoardStyle(0xDCEBFF, 0x0A1F44, 0x56CCF2)),
-        BlockSkin("skin_grape", "GRAPE", 0x9B5DE5, board = BoardStyle(0xEFE3FC, 0x2A1145, 0xC77DFF)),
         BlockSkin("skin_snow", "SNOW", 0xEEF3F8, board = BoardStyle(0xB9D3E6, 0x2C3E50, 0xFFFFFF)),
         BlockSkin(
             "skin_slime", "SLIME", 0x3CC43A, price = 300, description = "JIGGLES WHEN HIT",

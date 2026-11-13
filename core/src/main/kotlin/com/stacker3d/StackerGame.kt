@@ -42,6 +42,7 @@ class StackerGame(val debug: DebugOptions = DebugOptions()) : Game() {
         assets = Assets(settings)
         assets.resize(Gdx.graphics.width, Gdx.graphics.height)
         when {
+            debug.startScreen == "nofall" -> startGame(noFall = true)
             debug.autoplay || debug.startScreen == "game" -> startGame()
             debug.startScreen == "settings" -> setScreen(SettingsScreen(this) { showMenu() })
             debug.startScreen == "paused" -> { startGame(); screen.pause() }
@@ -60,7 +61,8 @@ class StackerGame(val debug: DebugOptions = DebugOptions()) : Game() {
 
     fun showMenu() = replaceScreen(MenuScreen(this))
 
-    fun startGame() = replaceScreen(GameScreen(this))
+    /** [noFall]: the No Fall mode, where overhanging cubes grow the board instead of falling off. */
+    fun startGame(noFall: Boolean = false) = replaceScreen(GameScreen(this, noFall))
 
     /** Opens settings; [back] decides where to go afterwards (menu, or resume a paused game). */
     fun showSettings(back: () -> Unit) = setScreen(SettingsScreen(this, back))
