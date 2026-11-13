@@ -48,6 +48,9 @@ class Models : Disposable {
     val multiplierBlock = texturedCube("textures/cube_multiplier.png")
     val crackedBlock = texturedCube("textures/cube_cracked.png")
     val mysteryBlock = texturedCube("textures/cube_mystery.png")
+    val dynamiteBlock = texturedCube("textures/cube_dynamite.png")
+    val glassBlock = texturedCube("textures/cube_glass.png")
+    val freezeBlock = texturedCube("textures/cube_freeze.png")
 
     /** Jelly, bubble and gum cubes for the fancier skins. */
     private val skinModels = SkinModels()
@@ -122,6 +125,41 @@ class Models : Disposable {
         builder.end()
     }
 
+    /**
+     * Rim along one open side of a grown board's tile (No Fall mode), placed on the tile's +Z side: the slab lip,
+     * the raised colored rim and the foot, matching the 3×3 board's frame. Materials: base, rim, foot.
+     */
+    val boardEdge: Model = rimPiece(1f)
+
+    /** Fills the outer corner between two [boardEdge]s, on the tile's +X/+Z corner. Same materials. */
+    val boardCorner: Model = rimPiece(null)
+
+    /** [length] along X for an edge piece, or null for a square corner piece offset in X too. */
+    private fun rimPiece(length: Float?): Model {
+        builder.begin()
+        fun box(part: com.badlogic.gdx.graphics.g3d.utils.MeshPartBuilder, y: Float, h: Float, from: Float, to: Float, overhang: Float) {
+            val c = (from + to) / 2f
+            val w = to - from
+            if (length != null) BoxShapeBuilder.build(part, 0f, y, c, length + overhang, h, w)
+            else BoxShapeBuilder.build(part, c, y, c, w, h, w)
+        }
+        val base = builder.part("base", GL20.GL_TRIANGLES, ATTRS, Material(ColorAttribute.createDiffuse(Color.valueOf("2B3A67"))))
+        box(base, -0.27f, 0.42f, 0.5f, 0.68f, 0f)
+        val rim = builder.part("rim", GL20.GL_TRIANGLES, ATTRS, Material(ColorAttribute.createDiffuse(Color.valueOf("5B7CFA"))))
+        box(rim, -0.01f, 0.1f, 0.52f, 0.68f, 0f)
+        val foot = builder.part("foot", GL20.GL_TRIANGLES, ATTRS, Material(ColorAttribute.createDiffuse(Color.valueOf("1A2442"))))
+        box(foot, -0.62f, 0.28f, 0.53f, 0.78f, 0.06f)
+        return builder.end()
+    }
+
+    /** Paints a [boardEdge] or [boardCorner] instance in the equipped skin's board colors. */
+    fun paintRim(instance: ModelInstance) {
+        val style = skin.board
+        listOf(style.base, style.rim, shade(style.base, 0.65f)).forEachIndexed { i, rgb ->
+            (instance.materials[i].get(ColorAttribute.Diffuse) as ColorAttribute).color.set(rgb shl 8 or 0xFF)
+        }
+    }
+
     /** Paints a [boardTile] instance in the equipped skin's board colors; [alt] is the darker checker tile. */
     fun paintTile(instance: ModelInstance, alt: Boolean) {
         val style = skin.board
@@ -166,6 +204,9 @@ class Models : Disposable {
         PieceType.Kind.MULTIPLIER -> multiplierBlock
         PieceType.Kind.CRACKED -> crackedBlock
         PieceType.Kind.MYSTERY -> mysteryBlock
+        PieceType.Kind.DYNAMITE -> dynamiteBlock
+        PieceType.Kind.GLASS -> glassBlock
+        PieceType.Kind.FREEZE -> freezeBlock
         PieceType.Kind.NORMAL -> plainModels[Math.floorMod(mix(look), plainModels.size)]
     }
 
@@ -176,7 +217,8 @@ class Models : Disposable {
 
     override fun dispose() {
         skinModels.dispose()
-        listOf(cube, bomb, xBlock, heartBlock, goldBlock, multiplierBlock, crackedBlock, mysteryBlock, ghost, pillar, board, boardTile)
+        listOf(cube, bomb, xBlock, heartBlock, goldBlock, multiplierBlock, crackedBlock, mysteryBlock, dynamiteBlock, glassBlock, freezeBlock, ghost, pillar, board, boardTile,
+            boardEdge, boardCorner)
             .forEach { it.dispose() }
         textures.forEach { it.dispose() }
     }

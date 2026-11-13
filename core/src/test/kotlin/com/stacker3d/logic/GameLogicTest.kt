@@ -369,14 +369,74 @@ class GameLogicTest {
         assertTrue(fuse in GameLogic.CRACK_MIN_LAYERS..GameLogic.CRACK_MAX_LAYERS)
 
         fillLevel(fuse) // tower top is now `fuse` tall: fuse - 1 layers above the cracked cube
-        assertTrue(rec.landings.none { it.crumbled.isNotEmpty() })
+        assertTrue(rec.landings.none { it.breaks.isNotEmpty() })
         assertEquals(PieceType.CRACKED, logic.board.typeAt(0, 0, 0))
 
         single(1, 1) // one more layer on another column breaks it
-        assertEquals(listOf(v(0, 0, 0)), rec.landings.last().crumbled)
+        assertEquals(listOf(v(0, 0, 0)), rec.landings.last().breaks.map { it.at })
         assertEquals(fuse - 1, logic.board.height(0, 0))
         assertTrue((0 until logic.board.height(0, 0)).none { logic.board.typeAt(0, it, 0) == PieceType.CRACKED })
         assertEquals(3, logic.hearts)
+    }
+
+    @Test
+    fun `dynamite blows up its whole layer after its fuse burns down`() {
+        // Layer 0 full except (1,1); a second layer on (0,0) so we can see cubes drop.
+        for (x in 0..2) for (z in 0..2) if (x != 1 || z != 1) single(x, z)
+        single(0, 0)
+        drop(listOf(v(0, 0, 0)), 1, 1, PieceType.DYNAMITE) // sits at layer 0
+        val fuse = logic.board.fuseAt(1, 0, 1)
+        assertTrue(fuse in GameLogic.DYNAMITE_MIN_FUSE..GameLogic.DYNAMITE_MAX_FUSE, "fuse $fuse")
+        assertEquals(listOf(fuse), logic.dynamiteFuses())
+        repeat(fuse - 1) { single(2, 2) }
+        assertTrue(rec.landings.none { it.breaks.isNotEmpty() })
+        assertEquals(listOf(1), logic.dynamiteFuses())
+
+        single(2, 2) // the last landing sets it off
+        val last = rec.landings.last()
+        assertEquals(9, last.breaks.size)
+        assertTrue(last.breaks.all { it.cause == BreakCause.DYNAMITE && it.at.y == 0 })
+        assertEquals(1, logic.board.height(0, 0)) // its second cube dropped into layer 0
+        assertEquals(0, logic.board.height(1, 1))
+        assertTrue(logic.dynamiteFuses().isEmpty())
+        assertEquals(3, logic.hearts)
+    }
+
+    @Test
+    fun `glass survives a flush landing but shatters when a cube drops onto it`() {
+        drop(listOf(v(0, 0, 0)), 0, 0, PieceType.GLASS)
+        // 10 per cube + 60 glass bonus + 50 new layer + 25 perfect.
+        assertEquals(145, rec.landings.last().points)
+
+        single(0, 0) // lands flush on it: safe
+        assertEquals(PieceType.GLASS, logic.board.typeAt(0, 0, 0))
+        assertTrue(rec.landings.last().breaks.isEmpty())
+
+        // A domino blocked by column (1,0) (2 tall) drops its other cube onto glass at (2,0).
+        drop(listOf(v(0, 0, 0)), 1, 0)
+        drop(listOf(v(0, 0, 0)), 1, 0)
+        drop(listOf(v(0, 0, 0)), 2, 0, PieceType.GLASS)
+        drop(listOf(v(0, 0, 0), v(1, 0, 0)), 1, 0)
+        val last = rec.landings.last()
+        assertEquals(listOf(Break(v(2, 0, 0), PieceType.GLASS, BreakCause.SHATTER)), last.breaks)
+        assertEquals(1, logic.board.height(2, 0))
+        assertTrue(logic.board.typeAt(2, 0, 0) != PieceType.GLASS)
+        assertEquals(10, last.points) // 20 for the cubes + 50 new layer - 60 glass bonus
+    }
+
+    @Test
+    fun `freeze block slows the next five pieces back to the starting speed`() {
+        fillLevel(6) // fast enough to be below the starting speed
+        val fast = logic.fallInterval
+        assertTrue(fast < GameLogic.START_FALL_INTERVAL)
+        drop(listOf(v(0, 0, 0)), 1, 1, PieceType.FREEZE)
+        assertTrue(rec.landings.last().froze)
+        repeat(GameLogic.FREEZE_PIECES) {
+            assertEquals(GameLogic.START_FALL_INTERVAL, logic.fallInterval)
+            single(it % 3, 0)
+        }
+        assertEquals(0, logic.frozenPieces)
+        assertTrue(logic.fallInterval < GameLogic.START_FALL_INTERVAL)
     }
 
     @Test
@@ -385,7 +445,7 @@ class GameLogicTest {
         drop(listOf(v(0, 0, 0)), 0, 0, PieceType.BOMB)
         assertEquals(0, logic.board.height(0, 0))
         fillLevel(GameLogic.CRACK_MAX_LAYERS + 1)
-        assertTrue(rec.landings.none { it.crumbled.isNotEmpty() })
+        assertTrue(rec.landings.none { it.breaks.isNotEmpty() })
     }
 
     @Test
@@ -579,12 +639,28 @@ class GameLogicTest {
     }
 
     @Test
-    fun `no fall mode grows below zero and the preview shows it`() {
+    fun `no fall hanging cubes stay at their level with air underneath`() {
         logic.noFall = true
+        val bar = listOf(v(0, 0, 0), v(0, 1, 0), v(0, 2, 0))
+        drop(bar, 2, 0) // column (2, 0) is 3 tall
         awaitPiece()
-        val p = logic.previewDrop(Orientation.normalize(listOf(v(0, 0, 0), v(1, 0, 0))), -1, 0)!!
-        assertEquals(0, p.lostCount)
-        assertTrue(p.onBoard.all { it })
+        val domino = Orientation.normalize(listOf(v(0, 0, 0), v(1, 0, 0)))
+        val preview = logic.previewDrop(domino, 2, 0)!!
+        assertEquals(0, preview.lostCount)
+        assertTrue(v(3, 3, 0) in preview.cells)
+        drop(domino, 2, 0) // lands on top at layer 3, second cube hangs over x = 3 at layer 3
+        assertEquals(listOf(v(3, 3, 0)), rec.landings.last().grown)
+        assertEquals(3, logic.board.base(3, 0))
+        assertEquals(4, logic.board.height(3, 0))
+        // The next cube over that cell lands on the raised one, not on the ground.
+        drop(listOf(v(0, 0, 0)), 3, 0)
+        assertEquals(5, logic.board.height(3, 0))
+        assertEquals(v(3, 4, 0), rec.landings.last().placed.single().to)
+    }
+
+    @Test
+    fun `no fall mode grows below zero`() {
+        logic.noFall = true
         drop(listOf(v(0, 0, 0), v(1, 0, 0)), -1, 0)
         assertTrue(logic.board.inside(-1, 0))
         assertEquals(1, logic.board.height(-1, 0))
@@ -592,11 +668,13 @@ class GameLogicTest {
     }
 
     @Test
-    fun `no fall mode has no gap rule`() {
+    fun `no fall mode keeps the 10 level gap rule`() {
         logic.noFall = true
         val bar = listOf(v(0, 0, 0), v(0, 1, 0), v(0, 2, 0))
-        repeat(4) { drop(bar, 0, 0) }
+        repeat(3) { drop(bar, 0, 0) }
         assertNull(rec.gameOver)
+        single(0, 0)
+        assertEquals(GameOverReason.GAPS, rec.gameOver)
     }
 
     @Test
@@ -604,5 +682,44 @@ class GameLogicTest {
         drop(listOf(v(0, 0, 0), v(1, 0, 0)), 2, 0)
         assertEquals(1, rec.landings.last().lost.size)
         assertFalse(logic.board.inside(3, 0))
+    }
+
+    @Test
+    fun `huge pieces come only in no fall mode, tier by tier`() {
+        val classic = PieceBag(Random(5))
+        repeat(500) { assertFalse(classic.next(1000).noFallOnly) }
+        val bag = PieceBag(Random(5)).apply { noFall = true }
+        repeat(300) { assertFalse(bag.next(24).noFallOnly) }
+        val seen = HashSet<PieceType>()
+        repeat(600) { seen += bag.next(150) }
+        assertTrue(seen.containsAll(PieceType.hugePieces))
+        assertEquals(listOf(25, 50, 75, 100, 125, 150), PieceType.hugePieces.map { it.unlockHeight }.distinct())
+        // Each tier is at least as big as the one before, and every huge piece is longer than the 3×3.
+        val tiers = PieceType.hugePieces.groupBy { it.unlockHeight }.values.map { t -> t.sumOf { it.cells.size } }
+        assertEquals(tiers.sorted(), tiers)
+        for (t in PieceType.hugePieces) {
+            assertTrue(maxOf(Orientation.extent(t.cells) { it.x }, Orientation.extent(t.cells) { it.z }) > 3, "$t")
+            assertEquals(t.cells.size, t.cells.toSet().size)
+        }
+    }
+
+    @Test
+    fun `no fall mode unlocks huge pieces as the tower climbs`() {
+        logic.noFall = true
+        fillLevel(25)
+        assertTrue(rec.unlocks.flatten().containsAll(PieceType.hugePieces.filter { it.unlockHeight == 25 }))
+        assertTrue(rec.unlocks.flatten().none { it.noFallOnly && it.unlockHeight > 25 })
+    }
+
+    @Test
+    fun `specials attach to huge pieces without making them longer`() {
+        val random = Random(4)
+        for (base in PieceType.hugePieces) repeat(20) {
+            val spec = PieceSpec.attached(base, PieceType.GOLD, random)
+            assertEquals(base.cells.size + 1, spec.cells.size, "$base")
+            val longest = maxOf(Orientation.extent(base.cells) { it.x }, Orientation.extent(base.cells) { it.z })
+            assertTrue(Orientation.extent(spec.cells) { it.x } <= longest)
+            assertTrue(Orientation.extent(spec.cells) { it.z } <= longest)
+        }
     }
 }

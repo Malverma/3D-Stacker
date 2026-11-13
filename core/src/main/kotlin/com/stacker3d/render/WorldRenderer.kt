@@ -11,6 +11,8 @@ import com.badlogic.gdx.math.MathUtils
 import com.badlogic.gdx.math.Vector3
 import com.badlogic.gdx.utils.Disposable
 import com.stacker3d.logic.Board
+import com.stacker3d.logic.Break
+import com.stacker3d.logic.BreakCause
 import com.stacker3d.logic.DropPreview
 import com.stacker3d.logic.GameLogic
 import com.stacker3d.logic.LandingResult
@@ -112,6 +114,10 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
     var onExplode: (() -> Unit)? = null
     /** Called when cracked cubes crumble on screen, with how many broke. */
     var onCrumble: ((Int) -> Unit)? = null
+    /** Called when Glass Blocks shatter on screen, with how many broke. */
+    var onShatter: ((Int) -> Unit)? = null
+    /** Called when Dynamite blows up a layer on screen, with how many cubes it destroyed. */
+    var onDynamite: ((Int) -> Unit)? = null
 
     var towerHeight = 0
     var gameOver = false
@@ -173,6 +179,9 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         frameZ = (footprint.minZ + footprint.maxZ) / 2f - 1f
     }
 
+    /** Top layer of the tallest column on screen. */
+    private fun towerTop() = footprint.cells.maxOf { footprint.baseAt(it) + columns[it].size }
+
     /** Places the camera target so the tower top sits about a third of the way up the screen. */
     private fun towerOffset() = viewHeight / 6f / cos(PITCH * MathUtils.degreesToRadians)
 
@@ -202,7 +211,7 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
     /** Appends a cube on top of column (x, z); [fromY] makes it drop in from higher up. */
     fun addCube(x: Int, z: Int, type: PieceType, fromY: Float? = null, group: Int = -1, look: Int = MathUtils.random.nextInt(Int.MAX_VALUE)) {
         val column = columns[Board.index(x, z)]
-        val y = column.size
+        val y = footprint.base(x, z) + column.size
         val instance = models.instance(type, look)
         if (models.skin.melts) {
             instance.setDrips(DRIP_START)
@@ -230,7 +239,7 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         pending?.let { resolvePending(it) }
         val offsetY = max(0f, visual.y - result.origin.y)
         if (result.grown.isNotEmpty()) {
-            for (g in result.grown) footprint.grow(g.x, g.z)
+            for (g in result.grown) footprint.grow(g.x, g.z, g.y)
             frame()
         }
         // Stack first: a bomb's blast indices count the cubes this same piece just placed.
@@ -248,7 +257,7 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         } else if (result.dodged && cell != null) {
             fallOff(ModelInstance(models.xBlock), cell.x, cell.y + offsetY, cell.z)
         }
-        if (pending == null) crumble(result.crumbled)
+        if (pending == null) crumble(result.breaks)
     }
 
     /**
@@ -256,7 +265,7 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
      * last and each cube a little after the one below, so the holes visibly fill up. [cells] are bottom-up per column.
      */
     fun fillGaps(cells: List<Vec3i>, type: PieceType) {
-        val start = columns.maxOf { it.size } + FILL_DROP
+        val start = towerTop() + FILL_DROP
         var col = -1
         var colIndex = -1
         var k = 0
@@ -281,30 +290,59 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         else -> models.mysteryBlock
     }
 
-    /** Breaks cracked cubes in the order the logic did, dropping everything above each one by a layer. */
-    private fun crumble(cells: List<Vec3i>) {
-        if (cells.isEmpty()) return
-        for (c in cells) {
+    /**
+     * Breaks tower cubes in the order the logic did (shattered glass, dynamite layers, crumbled cracked cubes),
+     * dropping everything above each one by a layer.
+     */
+    private fun crumble(breaks: List<Break>) {
+        if (breaks.isEmpty()) return
+        for (br in breaks) {
+            val c = br.at
             val column = columns[Board.index(c.x, c.z)]
-            if (c.y >= column.size) continue
-            val broken = column.removeAt(c.y)
+            val b = footprint.base(c.x, c.z)
+            if (c.y - b !in column.indices) continue
+            val broken = column.removeAt(c.y - b)
             goo.remove(broken)
             settles.removeAll { it.instance === broken }
-            jiggle(c.x, c.y, c.z, CRUMBLE_KICK)
             val center = Vector3(c.x - 1f, c.y + 0.5f, c.z - 1f)
-            repeat(7) {
-                val dir = tmp.set(MathUtils.random(-1f, 1f), MathUtils.random(-0.2f, 0.8f), MathUtils.random(-1f, 1f)).nor()
-                addDebris(ModelInstance(models.crackedBlock), center.cpy(), Vector3(dir.x * 3.5f, dir.y * 4f, dir.z * 3.5f), 0.36f)
+            when (br.cause) {
+                BreakCause.CRUMBLE -> {
+                    jiggle(c.x, c.y, c.z, CRUMBLE_KICK)
+                    repeat(7) {
+                        val dir = tmp.set(MathUtils.random(-1f, 1f), MathUtils.random(-0.2f, 0.8f), MathUtils.random(-1f, 1f)).nor()
+                        addDebris(ModelInstance(models.crackedBlock), center.cpy(), Vector3(dir.x * 3.5f, dir.y * 4f, dir.z * 3.5f), 0.36f)
+                    }
+                }
+                BreakCause.SHATTER -> {
+                    jiggle(c.x, c.y, c.z, CRUMBLE_KICK)
+                    repeat(10) {
+                        val dir = tmp.set(MathUtils.random(-1f, 1f), MathUtils.random(0f, 0.9f), MathUtils.random(-1f, 1f)).nor()
+                        addDebris(ModelInstance(models.glassBlock), center.cpy(), Vector3(dir.x * 4.5f, dir.y * 5f, dir.z * 4.5f), 0.24f)
+                    }
+                    flashes += Flash(ModelInstance(models.ghost), center, Color(0.85f, 0.95f, 1f, 1f))
+                }
+                BreakCause.DYNAMITE -> {
+                    // The whole layer is flung outward from the board's center.
+                    jiggle(c.x, c.y, c.z, BOMB_KICK)
+                    val dir = tmp.set(center.x - lookX, 0.5f, center.z - lookZ)
+                        .add(MathUtils.random(-0.4f, 0.4f), MathUtils.random(0f, 0.5f), MathUtils.random(-0.4f, 0.4f)).nor()
+                    addDebris(broken, center.cpy(), Vector3(dir.x * 9f, 5f + dir.y * 6f, dir.z * 9f), 1f)
+                    flashes += Flash(ModelInstance(models.ghost), center, Color(1f, 0.55f, 0.1f, 1f))
+                }
             }
-            for (i in c.y until column.size) {
+            for (i in c.y - b until column.size) {
                 val above = column[i]
+                val layer = b + i
                 val settling = settles.firstOrNull { it.instance === above }
-                if (settling != null) settling.targetY = i.toFloat()
-                else settles += Settle(above, c.x - 1f, i + 1f, i.toFloat(), c.z - 1f, -1)
+                if (settling != null) settling.targetY = layer.toFloat()
+                else settles += Settle(above, c.x - 1f, layer + 1f, layer.toFloat(), c.z - 1f, -1)
             }
         }
-        shake(0.5f)
-        onCrumble?.invoke(cells.size)
+        val blasted = breaks.count { it.cause == BreakCause.DYNAMITE }
+        shake(if (blasted > 0) 1f else 0.5f)
+        breaks.count { it.cause == BreakCause.CRUMBLE }.let { if (it > 0) onCrumble?.invoke(it) }
+        breaks.count { it.cause == BreakCause.SHATTER }.let { if (it > 0) onShatter?.invoke(it) }
+        if (blasted > 0) onDynamite?.invoke(blasted)
     }
 
     /** A cube that missed the board tumbles away outward. */
@@ -323,8 +361,9 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
             // Remove blasted cubes (highest first so indices stay valid) and fling them outward.
             for ((pos, _) in result.cleared.sortedByDescending { it.first.y }) {
                 val column = columns[Board.index(pos.x, pos.z)]
-                if (pos.y >= column.size) continue
-                val inst = column.removeAt(pos.y)
+                val b = footprint.base(pos.x, pos.z)
+                if (pos.y - b !in column.indices) continue
+                val inst = column.removeAt(pos.y - b)
                 goo.remove(inst)
                 settles.removeAll { it.instance === inst }
                 val from = Vector3(pos.x - 1f, pos.y + 0.5f, pos.z - 1f)
@@ -334,7 +373,7 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
             // Survivors above the blast drop into the hole.
             for (s in result.shifted) {
                 val column = columns[Board.index(s.to.x, s.to.z)]
-                val inst = column.getOrNull(s.to.y) ?: continue
+                val inst = column.getOrNull(s.to.y - footprint.base(s.to.x, s.to.z)) ?: continue
                 settles.removeAll { it.instance === inst }
                 settles += Settle(inst, s.to.x - 1f, s.from.y.toFloat(), s.to.y.toFloat(), s.to.z - 1f, -1)
             }
@@ -352,7 +391,7 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
             flashes += Flash(ModelInstance(models.ghost), center, Color(1f, 0.15f, 0.2f, 1f))
             onImpact?.invoke()
         }
-        crumble(result.crumbled)
+        crumble(result.breaks)
     }
 
     /**
@@ -366,8 +405,9 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
             if (column.isEmpty()) continue
             val reach = WOBBLE_REACH - abs(Board.xOf(ci) - x) - abs(Board.zOf(ci) - z)
             if (reach < 0) continue
-            for (cy in max(0, y - reach)..min(column.size - 1, y + reach)) {
-                val d = WOBBLE_REACH - reach + abs(cy - y)
+            val b = footprint.baseAt(ci)
+            for (cy in max(0, y - reach - b)..min(column.size - 1, y + reach - b)) {
+                val d = WOBBLE_REACH - reach + abs(b + cy - y)
                 if (d > WOBBLE_REACH) continue
                 val add = strength * WOBBLE_FALLOFF.pow(d)
                 val delay = d * WOBBLE_DELAY
@@ -424,7 +464,7 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
                 }
                 val sy = fill * (1f - squash)
                 val sxz = spread * (1f + squash * 0.5f)
-                inst.transform.setToTranslation(Board.xOf(ci) - 1f, cy + 0.5f + sink - CUBE_SIZE / 2f * (1f - sy), Board.zOf(ci) - 1f)
+                inst.transform.setToTranslation(Board.xOf(ci) - 1f, footprint.baseAt(ci) + cy + 0.5f + sink - CUBE_SIZE / 2f * (1f - sy), Board.zOf(ci) - 1f)
                     .scale(sxz, sy, sxz)
                 sink -= CUBE_SIZE * fill * squash
             }
@@ -478,7 +518,7 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
             if (sx in minX - pad..maxX + pad && y in minY - pad..maxY + pad) return false
         }
         // Convex hull of the board slab and the tower's bounding box, projected to the screen.
-        val top = max(0.5f, columns.maxOf { it.size }.toFloat())
+        val top = max(0.5f, towerTop().toFloat())
         for (corner in 0..7) {
             val p = cam.project(
                 tmp.set(
@@ -645,24 +685,45 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         pools.values.forEach { it.forEach { inst -> inst.userData = null } }
 
         batch.begin(cam)
-        if (camY - viewHeight < 1f) {
-            if (footprint.isClassic) {
+        val lo = max(0, floor(camY - viewHeight * 1.2f).toInt())
+        if (footprint.isClassic) {
+            if (camY - viewHeight < 1f) {
                 models.paintBoard(boardInstance)
                 batch.render(boardInstance, env)
-            } else {
-                // A grown board is drawn tile by tile, checkered like the 3×3.
-                for (i in footprint.cells) {
-                    val x = Board.xOf(i)
-                    val z = Board.zOf(i)
-                    val inst = pooled(models.boardTile)
-                    models.paintTile(inst, (x + z).mod(2) == 1)
-                    inst.transform.setToTranslation(x - 1f, 0f, z - 1f)
-                    batch.render(inst, env)
+            }
+        } else {
+            // A grown board is drawn tile by tile, checkered like the 3×3. Cells grown off a cube hanging above
+            // ground level get no tile: the cube just stays up there.
+            if (camY - viewHeight < 1f) for (i in footprint.cells) {
+                if (footprint.baseAt(i) != 0) continue
+                val x = Board.xOf(i)
+                val z = Board.zOf(i)
+                val inst = pooled(models.boardTile)
+                models.paintTile(inst, (x + z).mod(2) == 1)
+                inst.transform.setToTranslation(x - 1f, 0f, z - 1f)
+                batch.render(inst, env)
+                // The colored rim follows the outline of the ground-level floor: an edge on every open side,
+                // and a corner piece where two open sides meet with nothing diagonal.
+                for (side in 0..3) {
+                    val (dx, dz) = SIDES[side]
+                    if (groundTile(x + dx, z + dz)) continue
+                    val edge = pooled(models.boardEdge)
+                    models.paintRim(edge)
+                    edge.transform.setToTranslation(x - 1f, 0f, z - 1f).rotate(Vector3.Y, side * 90f)
+                    batch.render(edge, env)
+                    val (cx, cz) = SIDES[(side + 1) % 4]
+                    if (groundTile(x + cx, z + cz) || groundTile(x + dx + cx, z + dz + cz)) continue
+                    val corner = pooled(models.boardCorner)
+                    models.paintRim(corner)
+                    corner.transform.setToTranslation(x - 1f, 0f, z - 1f).rotate(Vector3.Y, side * 90f)
+                    batch.render(corner, env)
                 }
             }
         }
-        val lo = max(0, floor(camY - viewHeight * 1.2f).toInt())
-        for (column in columns) for (y in lo until column.size) batch.render(column[y], env)
+        for (ci in footprint.cells) {
+            val column = columns[ci]
+            for (i in max(0, lo - footprint.baseAt(ci)) until column.size) batch.render(column[i], env)
+        }
         for (d in debris) batch.render(d.instance, env)
         pending?.let { batch.render(it.instance, env) }
 
@@ -728,6 +789,9 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
     }
 
     /** Reuses instances across frames: each one is marked as taken until the next render call. */
+    /** Cell ([x], [z]) is on the board with its floor at ground level (so it has a drawn tile). */
+    private fun groundTile(x: Int, z: Int) = footprint.inside(x, z) && footprint.base(x, z) == 0
+
     private fun pooled(model: Model): ModelInstance {
         val pool = pools.getOrPut(model) { ArrayList() }
         val free = pool.firstOrNull { it.userData == null } ?: ModelInstance(model).also { pool += it }
@@ -744,6 +808,12 @@ class WorldRenderer(private val models: Models, theme: SkyTheme = Catalog.classi
         const val FOV = 38f
         const val PITCH = 30f
         const val BASE_YAW = 45f
+        /**
+         * Neighbor offsets in the order a quarter turn about +Y maps the rim models' +Z side onto them
+         * (+Z, +X, -Z, -X), so side n is drawn rotated n × 90°.
+         */
+        private val SIDES = arrayOf(0 to 1, 1 to 0, 0 to -1, -1 to 0)
+
         /** Degrees a two-finger twist must reach before release turns the board. */
         const val TWIST_COMMIT = 20f
         /** World units that must fit across the screen around the board center (board + overhang room). */

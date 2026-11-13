@@ -64,9 +64,30 @@ The rough draft shows:
 ## 4b. No Fall Mode
 
 Started with the **NO FALL** button under Play on the main menu. All the normal rules apply, with these changes:
-- **Overhanging cubes grow the board.** A piece still needs at least one cube over the board, as usual. When it lands, any cube hanging off the edge does not fall away. Its cell joins the board, a new tile appears there, and the cube settles into it like any other cube (straight down onto the new tile). The landing shadow is white for those cubes, not red.
-- The board can grow up to **6 cells past the starting 3×3 on every side** (15×15 at most). A cube beyond that still falls off and costs a heart, as in the classic game.
-- **No gap rule.** New cells start empty, so "BOARD NOT FILLED", the warning pillars and the "FILL THE GAPS!" banner are all off.
+- **Overhanging cubes grow the board.** A piece still needs at least one cube over the board, as usual. When it lands, any cube hanging off the edge does not fall. It **stays at the level it was hanging at**, and its cell joins the board at that level. Later cubes over that cell stack on it like any other column. The landing shadow is white for those cubes, not red.
+- The empty space under a raised cell is air. It counts as filled, like the rest of a solid column, so pieces can't pass under it.
+- A cube beyond the growth limit still falls off and costs a heart, as in the classic game.
+- **The gap rule still applies:** a column 10 or more levels behind the tallest ends the run with "BOARD NOT FILLED", with the same warnings. A raised cell's height is its top, so it starts level with the cubes it grew from.
+- Cells grown off a cube above ground level get **no tile**: the cube just stays up there, with air below. Only cells grown at ground level get a new board tile.
+- The board can grow up to **8 cells past the starting 3×3 on every side** (19×19 at most).
+- **Huge pieces.** On top of the normal large pieces (§6), No Fall adds a tier of huge pieces every 25 levels. Each one is longer than the 3×3, so it always hangs off and grows the board, and each tier is bigger and more awkward than the last. They unlock with a "HUGE PIECES!" banner and join the bag like large pieces do (slipped into the current bag, then once per bag). As more tiers unlock, a larger share of every bag is huge, and the bigger pieces score more and so speed the game up faster.
+
+| Unlocks at height | Name | Shape | Cubes |
+|---|---|---|---|
+| 25 | Long Bar | 4-long bar | 4 |
+| 25 | Long L | 4-long bar with a foot | 5 |
+| 50 | Wide U | 4-wide U | 6 |
+| 50 | Diagonal | Flat 4×3 staircase | 6 |
+| 75 | Giant Bar | 5-long bar | 5 |
+| 75 | Giant Tee | 5-wide T with a 2-long stem | 7 |
+| 100 | Cross | 5×5 plus sign | 9 |
+| 100 | Frame | Outline of a 4×4 square | 12 |
+| 125 | Big Stairs | Staircase four steps high | 10 |
+| 125 | Gate | Two 3-high legs 5 apart with a beam on top | 11 |
+| 150 | Mega Slab | Flat 5×3 slab | 15 |
+| 150 | Mega H | 5×5 H | 13 |
+
+- Shop specials can attach to huge pieces too, anywhere that keeps the piece no longer than its longest side.
 - X cubes work as usual: hanging off the edge they fall away safely ("DODGED!"), and they never grow the board.
 - **Camera:** the view stays centered on the board as it grows, possibly off to one side, and zooms out smoothly so the whole board stays in frame at every view angle.
 - No Fall keeps its own High Score and Best Height. The HUD shows "NO FALL" under the best score. Coins are earned the same way.
@@ -140,6 +161,9 @@ Specials start appearing after the first 4 pieces and never come twice in a row.
 | **Multiplier Block** | Purple cube with up chevrons | Stays in the tower. Raises the run's **score multiplier by ×0.1** (×1.0 → ×1.1 → ×1.2 …). The multiplier applies to every later landing's points, not to the block's own landing, and resets each run. Shown as "SCORE ×1.2" under the height. |
 | **Cracked Block** | Grey stone cube with cracks | Stays in the tower and scores **+40 bonus points**. Each one gets a random fuse of **10–15 layers**: once that many layers sit above it (measured against the tallest column), it crumbles. The cube is removed and everything above it in that column drops one layer, which can unbalance the tower. Bombs can destroy it early. |
 | **Mystery Block** | Teal/blue/purple cube with a "?" | Very rare. On landing over the board it turns into a random effect, shown as "MYSTERY: …": **Gold Rush** (becomes a Golden Block worth +10 coins), **Heal** (becomes a Heart Block; only rolled when a heart is missing), **Multiply** (becomes a Multiplier Block worth +×0.3), **Bomb** (explodes like a Bomb, after the rest of its piece has stacked), **Cracked** (becomes a Cracked Block, without the bonus) or **Curse** (shatters like an X cube and costs a heart). |
+| **Dynamite** | Red dynamite sticks with a lit fuse | Stays in the tower on a fuse of **3–5 landings** (picked at random). Each later landing burns it down by one, and the HUD shows "TNT IN N" for the soonest one, pulsing on its last landing. When it runs out, it destroys **every cube in its layer** across the whole board, including itself, and everything above drops one layer. **+30 points per cube destroyed.** Other Dynamite in that layer goes with it; a Bomb can destroy it early. |
+| **Glass Block** | Pale blue glass with glints | Stays in the tower and scores **+60 bonus points**. It **shatters** if a later piece drops a cube onto it: a cube that settles down onto it instead of landing flush. Shattering removes it (the cubes above drop one layer) and takes the 60 points back from that landing (never below 0). A piece that lands flush on it is safe. |
+| **Freeze Block** | Icy blue cube with a snowflake | Stays in the tower. The **next 5 pieces** fall at the starting speed (1 layer per 1.0 s), shown as "FROZEN N" in the HUD. Landing another Freeze Block restarts the count. |
 
 - Pieces are drawn with a **shuffled-bag randomizer**: every piece type appears once per bag, in random order. This prevents long streaks of the same piece.
 - A **"Next" preview** in the HUD shows the upcoming piece.
@@ -227,7 +251,7 @@ The SHOP button is on the main menu, under Play and Settings. It has three tabs:
 |---|---|---|
 | **Backgrounds** | Classic Sky (default), **Neon Nights** (synthwave pink/purple, stars from the start), **Desert Dusk** (sandy gold to burnt orange to violet night, with sun), **Aurora** (teal/green aurora bands, stars almost immediately), **Cotton Candy** (pastel pinks and lavenders, with sun) | Free / 100 coins |
 | **Blocks** | Classic Mix (default, one color per piece type), plus 5 single-color sets that paint every block one color: Ruby, Gold, Emerald, Ocean, Snow. Two premium sets: **Slime** and **Bubble Gum** (below) | Free / 100 coins each / 300 coins each |
-| **Specials** | Heart, Golden, Multiplier, Cracked and Mystery Blocks (§6) | see below |
+| **Specials** | Heart, Golden, Multiplier, Cracked, Mystery, Dynamite, Glass and Freeze Blocks (§6) | see below |
 
 - Buying a background or block set equips it right away. Owned items can be re-equipped at any time, and only one of each kind is active.
 - Special cubes always keep their printed faces, whatever block colors are equipped.
@@ -244,8 +268,11 @@ Every shop special starts locked. Buying it unlocks **level 1**, and it can then
 | Multiplier Block | 300 | 1% | +0.25% | 2% |
 | Cracked Block | 100 | 2% | +0.5% | 4% |
 | Mystery Block | 500 | 0.3% | +0.1% | 0.7% |
+| Dynamite | 250 | 1% | +0.35% | 2.4% |
+| Glass Block | 150 | 1.5% | +0.375% | 3% |
+| Freeze Block | 150 | 1.5% | +0.375% | 3% |
 
-**Balance:** hearts are kept scarce so that losing one still matters. X pieces alone are 8% of spawns. A Heart Block at level 1 heals about once per 250 pieces (roughly once per run), and two or three times per run fully upgraded. A Mystery Block can roll Heal only while a heart is missing. With everything at level 5, the shop specials total about 12% of spawns (Bomb and X add 13%).
+**Balance:** hearts are kept scarce so that losing one still matters. X pieces alone are 8% of spawns. A Heart Block at level 1 heals about once per 250 pieces (roughly once per run), and two or three times per run fully upgraded. A Mystery Block can roll Heal only while a heart is missing. With everything at level 5, the shop specials total about 20% of spawns (Bomb and X add 13%). The Mystery Block never turns into Dynamite, Glass or Freeze.
 
 Players who bought the Heart Block before upgrades existed keep it at level 1.
 

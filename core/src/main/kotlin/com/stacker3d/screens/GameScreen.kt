@@ -12,6 +12,7 @@ import com.badlogic.gdx.utils.Align
 import com.stacker3d.Autoplay
 import com.stacker3d.StackerGame
 import com.stacker3d.input.GestureInput
+import com.stacker3d.logic.BreakCause
 import com.stacker3d.logic.GameLogic
 import com.stacker3d.logic.GameOverReason
 import com.stacker3d.logic.PieceType
@@ -100,6 +101,17 @@ class GameScreen(private val game: StackerGame, private val noFall: Boolean = fa
             boomText = null
             a.play(a.sBoom)
             a.vibrate(90)
+        }
+        world.onShatter = { count ->
+            popups += Popup(if (count > 1) "SHATTERED x$count!" else "GLASS SHATTERED!", GLASS_BLUE)
+            a.play(a.sFall, 0.8f, 1.6f)
+            a.vibrate(50)
+        }
+        world.onDynamite = { count ->
+            boomFlash = 1f
+            popups += Popup("KABOOM! $count BLOCKS", DYNAMITE_RED, 1.6f)
+            a.play(a.sBoom)
+            a.vibrate(120)
         }
         world.onCrumble = { count ->
             popups += Popup(if (count > 1) "CRUMBLED x$count!" else "CRUMBLED!", STONE)
@@ -215,12 +227,24 @@ class GameScreen(private val game: StackerGame, private val noFall: Boolean = fa
                 popups += Popup("MYSTERY BLOCK!", MYSTERY_TEAL, 1.8f)
                 popups += Popup("ANYTHING CAN HAPPEN", Color.WHITE, 1.8f)
             }
+            PieceType.Kind.DYNAMITE -> {
+                popups += Popup("DYNAMITE!", DYNAMITE_RED, 1.8f)
+                popups += Popup("BLOWS UP ITS LAYER IN ${GameLogic.DYNAMITE_MIN_FUSE}-${GameLogic.DYNAMITE_MAX_FUSE} PIECES", Color.WHITE, 1.8f)
+            }
+            PieceType.Kind.GLASS -> {
+                popups += Popup("GLASS BLOCK!", GLASS_BLUE, 1.8f)
+                popups += Popup("+${GameLogic.GLASS_BONUS}, DON'T DROP CUBES ON IT", Color.WHITE, 1.8f)
+            }
+            PieceType.Kind.FREEZE -> {
+                popups += Popup("FREEZE BLOCK!", ICE, 1.8f)
+                popups += Popup("SLOWS THE NEXT ${GameLogic.FREEZE_PIECES} PIECES", Color.WHITE, 1.8f)
+            }
             PieceType.Kind.NORMAL -> Unit
         }
     }
 
     override fun onPiecesUnlocked(types: List<PieceType>) {
-        popups += Popup("BIGGER PIECES!", ACCENT, 2.2f, sticky = true)
+        popups += Popup(if (types.any { it.noFallOnly }) "HUGE PIECES!" else "BIGGER PIECES!", ACCENT, 2.2f, sticky = true)
         popups += Popup("${types.size} NEW SHAPES IN PLAY", Color.WHITE, 2.2f, sticky = true)
     }
 
@@ -247,6 +271,12 @@ class GameScreen(private val game: StackerGame, private val noFall: Boolean = fa
             popups += Popup("SCORE ${multiplierLabel()}", MULTIPLIER_PURPLE)
             a.play(a.sPerfect, 0.6f, 1.1f)
         }
+        if (result.froze) {
+            popups += Popup("FROZEN! SLOW FOR ${GameLogic.FREEZE_PIECES}", ICE, 1.6f)
+            a.play(a.sPerfect, 0.6f, 0.7f)
+        }
+        val shattered = result.breaks.count { it.cause == BreakCause.SHATTER }
+        if (shattered > 0) popups += Popup("-${GameLogic.GLASS_BONUS * shattered} GLASS BONUS", DANGER)
         if (result.perfect) {
             popups += Popup("PERFECT!", ACCENT)
             a.play(a.sPerfect, 0.5f)
@@ -417,9 +447,7 @@ class GameScreen(private val game: StackerGame, private val noFall: Boolean = fa
         healFlash = (healFlash - dt * 1.5f).coerceAtLeast(0f)
 
         val showGhost = state == State.PLAYING
-        // No Fall has no gap rule, so no warning pillars.
-        val warn = showGhost && !noFall
-        world.render(logic.current, if (showGhost) logic.ghost() else null, dt, if (warn) logic.board.heights() else null)
+        world.render(logic.current, if (showGhost) logic.ghost() else null, dt, if (showGhost) logic.board.heights() else null)
         preview.render(logic.next)
 
         batch.begin()
@@ -471,6 +499,20 @@ class GameScreen(private val game: StackerGame, private val noFall: Boolean = fa
             text(batch, a.fontSmall, "SCORE ${multiplierLabel()}", m + 6f * u, ry, Align.left)
             ry -= 65f * u
         }
+        if (logic.frozenPieces > 0) {
+            a.fontSmall.color = ICE
+            text(batch, a.fontSmall, "FROZEN ${logic.frozenPieces}", m + 6f * u, ry, Align.left)
+            a.fontSmall.color = Color.WHITE
+            ry -= 65f * u
+        }
+        logic.dynamiteFuses().firstOrNull()?.let { fuse ->
+            // Pulses faster as the soonest Dynamite Block gets close to going off.
+            val pulse = if (fuse <= 1) 0.55f + 0.45f * MathUtils.sin(time * 14f) else 1f
+            a.fontSmall.setColor(DYNAMITE_RED.r, DYNAMITE_RED.g, DYNAMITE_RED.b, pulse)
+            text(batch, a.fontSmall, "TNT IN $fuse", m + 6f * u, ry, Align.left)
+            a.fontSmall.color = Color.WHITE
+            ry -= 65f * u
+        }
         if (logic.bonusCoins > 0) {
             val cs = 50f * u
             batch.draw(a.coin, m + 6f * u, ry - cs / 2f, cs, cs)
@@ -512,7 +554,7 @@ class GameScreen(private val game: StackerGame, private val noFall: Boolean = fa
     /** Spec §4: warns before a trailing column ends the run. */
     private fun drawGapWarning(u: Float, m: Float) {
         val gap = logic.gap
-        if (noFall || state != State.PLAYING || gap < GameLogic.GAP_WARNING) return
+        if (state != State.PLAYING || gap < GameLogic.GAP_WARNING) return
         val left = GameLogic.GAP_LIMIT + 1 - gap
         val pulse = 0.65f + 0.35f * MathUtils.sin(time * 8f)
         val y = Gdx.graphics.safeInsetBottom + m + (if (game.settings.showButtons) 250f else 70f) * u
@@ -607,6 +649,9 @@ class GameScreen(private val game: StackerGame, private val noFall: Boolean = fa
         const val CONTINUE_SPACE = 200f
         private val MULTIPLIER_PURPLE: Color = Color.valueOf("B79CFF")
         private val STONE: Color = Color.valueOf("D8CFC4")
+        private val DYNAMITE_RED: Color = Color.valueOf("FF5A4E")
+        private val GLASS_BLUE: Color = Color.valueOf("BDE0FE")
+        private val ICE: Color = Color.valueOf("7FDBFF")
         private val MYSTERY_TEAL: Color = Color.valueOf("5FF0E0")
     }
 }

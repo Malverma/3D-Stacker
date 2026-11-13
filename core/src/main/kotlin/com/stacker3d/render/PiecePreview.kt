@@ -29,10 +29,13 @@ class PiecePreview(private val models: Models, private val size: Int = 256) : Di
         val cz = (Orientation.extent(cells) { it.z } - 1) / 2f
         val p = 30f * MathUtils.degreesToRadians
         val yaw = 45f * MathUtils.degreesToRadians
-        val d = 7.5f
-        cam.position.set(cx + MathUtils.sin(yaw) * cos(p) * d, 0.5f + MathUtils.sin(p) * d, cz + MathUtils.cos(yaw) * cos(p) * d)
+        // Pull back for No Fall's huge pieces so they still fit the box.
+        val longest = maxOf(Orientation.extent(cells) { it.x }, Orientation.extent(cells) { it.y }, Orientation.extent(cells) { it.z })
+        val d = 7.5f * maxOf(1f, longest / 3f)
+        val cy = (Orientation.extent(cells) { it.y } - 1) / 2f + 0.5f
+        cam.position.set(cx + MathUtils.sin(yaw) * cos(p) * d, cy + MathUtils.sin(p) * d, cz + MathUtils.cos(yaw) * cos(p) * d)
         cam.up.set(0f, 1f, 0f)
-        cam.lookAt(cx, 0.5f, cz)
+        cam.lookAt(cx, cy, cz)
         cam.update()
 
         // Attached specials make many distinct pieces; keep only a handful around.

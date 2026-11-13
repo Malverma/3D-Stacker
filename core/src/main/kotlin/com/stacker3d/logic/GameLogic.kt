@@ -8,6 +8,12 @@ import kotlin.random.Random
 /** A cube that locked into the tower: where it started ([from]), where it settled ([to]) and what it is. */
 data class PlacedCube(val from: Vec3i, val to: Vec3i, val type: PieceType)
 
+/** Why a tower cube broke after a landing. */
+enum class BreakCause { CRUMBLE, SHATTER, DYNAMITE }
+
+/** A tower cube removed after a landing: the cubes above it drop one layer. */
+data class Break(val at: Vec3i, val type: PieceType, val cause: BreakCause)
+
 /** A cube that missed the board and fell away. */
 data class LostCube(val at: Vec3i, val type: PieceType)
 
@@ -43,11 +49,14 @@ data class LandingResult(
     /** Mystery cube: the effect it turned into. */
     val mystery: MysteryEffect? = null,
     /**
-     * Cracked cubes that crumbled after this landing, in the order they broke. Each one is removed from its column
-     * and every cube above it drops one layer before the next one breaks.
+     * Tower cubes that broke after this landing, in order: Glass Blocks shattered by it, then layers blown up by
+     * Dynamite whose fuse ran out, then Cracked Blocks that crumbled. Each one is removed from its column and every
+     * cube above it drops one layer before the next one breaks.
      */
-    val crumbled: List<Vec3i> = emptyList(),
-    /** No Fall mode: cells (y = 0) that joined the board because a cube of this piece hung over them. */
+    val breaks: List<Break> = emptyList(),
+    /** A Freeze Block landed on the board: the next [GameLogic.FREEZE_PIECES] pieces fall at the starting speed. */
+    val froze: Boolean = false,
+    /** No Fall mode: cells that joined the board because a cube of this piece hung over them; y is the new floor. */
     val grown: List<Vec3i> = emptyList(),
 )
 
@@ -108,10 +117,12 @@ class GameLogic(
     var immortal = false
 
     /**
-     * No Fall mode: cubes hanging off the edge of a piece that has at least one cube on the board don't fall away;
-     * their cells join the board and they settle there. The gap rule is off, since new cells start empty.
+     * No Fall mode: cubes hanging off the edge of a piece that has at least one cube on the board don't fall away.
+     * They stay at the level they hung at, and their cells join the board with the floor there (air underneath,
+     * which counts as filled for the gap rule).
      */
     var noFall = false
+        set(value) { field = value; bag.noFall = value }
 
     /** Chance per spawn of each shop special ([PieceType.unlockables]); missing types never spawn. */
     var specialChances: Map<PieceType, Float> = emptyMap()
@@ -119,6 +130,9 @@ class GameLogic(
     /** Score multiplier in tenths: 10 is ×1.0. Each Multiplier Block adds [MULTIPLIER_STEP]. */
     var multiplierTenths = 10; private set
     val multiplier: Float get() = multiplierTenths / 10f
+
+    /** Pieces left that fall at the starting speed because of a Freeze Block. */
+    var frozenPieces = 0; private set
 
     /** Coins from Golden Blocks this run, paid out with the score coins when the run ends. */
     var bonusCoins = 0; private set
@@ -135,9 +149,13 @@ class GameLogic(
     private var fallTimer = 0f
     private var spawnTimer = 0f
 
-    /** Seconds per layer. Shrinks smoothly as the score climbs (spec §8). */
+    /** Seconds per layer. Shrinks smoothly as the score climbs (spec §8); a Freeze Block slows it back down for a while. */
     val fallInterval: Float
-        get() = max(MIN_FALL_INTERVAL, START_FALL_INTERVAL * SPEEDUP.pow(score / SPEEDUP_EVERY_POINTS))
+        get() = if (frozenPieces > 0) START_FALL_INTERVAL
+        else max(MIN_FALL_INTERVAL, START_FALL_INTERVAL * SPEEDUP.pow(score / SPEEDUP_EVERY_POINTS))
+
+    /** Landings left on each Dynamite Block in the tower, soonest first. */
+    fun dynamiteFuses(): List<Int> = cubesOf(PieceType.DYNAMITE).map { board.fuseAt(it.x, it.y, it.z) }.sorted().toList()
 
     /** How far the lowest column trails the tallest one. */
     val gap: Int get() = board.maxHeight() - board.minHeight()
@@ -151,6 +169,7 @@ class GameLogic(
         landedCount = 0
         multiplierTenths = 10
         bonusCoins = 0
+        frozenPieces = 0
         isGameOver = false
         gameOverReason = null
         revived = false
@@ -229,6 +248,7 @@ class GameLogic(
         if (cells.none { board.inside(it.x + x, it.z + z) }) return null
         val y = landingY(cells, x, z)
         val heights = board.heights()
+        val grown = HashSet<Int>()
         val out = MutableList(cells.size) { Vec3i(0, 0, 0) }
         val onBoard = MutableList(cells.size) { false }
         var lost = 0
@@ -244,6 +264,8 @@ class GameLogic(
                 onBoard[i] = xOnBoard
             } else if (stacksAt(wx, wz)) {
                 val col = Board.index(wx, wz)
+                // No Fall: a cell the board grows into gets its floor where its lowest cube hangs.
+                if (!board.inside(wx, wz) && grown.add(col)) heights[col] = c.y + y
                 out[i] = Vec3i(wx, heights[col], wz)
                 heights[col]++
                 onBoard[i] = true
@@ -340,14 +362,21 @@ class GameLogic(
             PieceType.Kind.X -> placeX(p, origin)
             else -> place(p, origin)
         }
+        // Glass under cubes that dropped onto it shatters, Dynamite fuses tick down, then cracked cubes crumble.
+        val breaks = shatterGlass(base.placed) + tickDynamite()
+        val shattered = breaks.count { it.cause == BreakCause.SHATTER }
+        val blasted = breaks.count { it.cause == BreakCause.DYNAMITE }
+        val points = max(0, base.points - GLASS_BONUS * shattered) + DYNAMITE_POINTS_PER_CUBE * blasted
         // The multiplier applies to this landing's points before a Multiplier Block raises it.
-        val result = base.copy(points = base.points * multiplierTenths / 10, crumbled = crumble())
+        val result = base.copy(points = points * multiplierTenths / 10, breaks = breaks + crumble())
+        if (frozenPieces > 0) frozenPieces--
+        if (result.froze) frozenPieces = FREEZE_PIECES
         multiplierTenths += result.multiplierGain
         bonusCoins += result.coins
         towerHeight = board.maxHeight()
         score += result.points
         listener.onLanded(result)
-        val unlocked = PieceType.largePieces.filter { it.unlockHeight in oldPeak + 1..peakHeight }
+        val unlocked = PieceType.unlockablesFor(noFall).filter { it.unlockHeight in oldPeak + 1..peakHeight }
         if (unlocked.isNotEmpty()) {
             bag.unlock(unlocked)
             listener.onPiecesUnlocked(unlocked)
@@ -368,7 +397,7 @@ class GameLogic(
                 return
             }
         }
-        if (!noFall && gap > GAP_LIMIT) endGame(GameOverReason.GAPS)
+        if (gap > GAP_LIMIT) endGame(GameOverReason.GAPS)
     }
 
     /** Ad reward: after running out of hearts, continue once with a single heart. */
@@ -433,11 +462,13 @@ class GameLogic(
         var gain = 0
         var bonus = 0
         var heart = false
+        var froze = false
         val grown = ArrayList<Vec3i>()
         for (i in world.indices.sortedBy { world[it].y }) {
             if (p.type.isX(i)) continue
             val c = world[i]
-            if (noFall && board.grow(c.x, c.z)) grown += Vec3i(c.x, 0, c.z)
+            // No Fall: a cube hanging off the edge stays at its level; its cell joins the board with its floor there.
+            if (noFall && board.grow(c.x, c.z, c.y)) grown += c
             val fromMystery = i == mysteryIndex
             val type = if (!fromMystery) p.cellType(i) else when (effect!!) {
                 MysteryEffect.GOLD_RUSH -> PieceType.GOLD
@@ -450,7 +481,12 @@ class GameLogic(
                 lost += LostCube(c, type)
                 continue
             }
-            val fuse = if (type == PieceType.CRACKED) random.nextInt(CRACK_MIN_LAYERS, CRACK_MAX_LAYERS + 1) else 0
+            val fuse = when (type) {
+                PieceType.CRACKED -> random.nextInt(CRACK_MIN_LAYERS, CRACK_MAX_LAYERS + 1)
+                // One more than its fuse: this same landing's tick takes the first one off.
+                PieceType.DYNAMITE -> random.nextInt(DYNAMITE_MIN_FUSE, DYNAMITE_MAX_FUSE + 1) + 1
+                else -> 0
+            }
             val y = board.push(c.x, c.z, type, fuse)
             placed += PlacedCube(c, Vec3i(c.x, y, c.z), type)
             when (type.kind) {
@@ -458,6 +494,8 @@ class GameLogic(
                 PieceType.Kind.GOLD -> coins += if (fromMystery) MYSTERY_GOLD_COINS else GOLD_COINS
                 PieceType.Kind.MULTIPLIER -> gain += if (fromMystery) MYSTERY_MULTIPLIER_STEP else MULTIPLIER_STEP
                 PieceType.Kind.CRACKED -> if (!fromMystery) bonus += CRACKED_BONUS
+                PieceType.Kind.GLASS -> bonus += GLASS_BONUS
+                PieceType.Kind.FREEZE -> froze = true
                 else -> Unit
             }
         }
@@ -469,6 +507,7 @@ class GameLogic(
         val r = LandingResult(
             p.type, origin, placed, lost, perfect, points,
             healed = heart && hearts < MAX_HEARTS, coins = coins, multiplierGain = gain, mystery = effect, grown = grown,
+            froze = froze,
         )
         if (mysteryIndex < 0) return r
         val cell = world[mysteryIndex]
@@ -487,21 +526,51 @@ class GameLogic(
         MysteryEffect.entries.filter { it != MysteryEffect.HEAL || hearts < MAX_HEARTS }.random(random)
 
     /** Breaks every cracked cube that now sits too far below the top of the tower; the cubes above it drop one layer. */
-    private fun crumble(): List<Vec3i> {
-        val out = ArrayList<Vec3i>()
+    private fun crumble(): List<Break> {
+        val out = ArrayList<Break>()
         while (true) {
             val top = board.maxHeight()
-            val cube = crackedCubes().firstOrNull { top - it.y - 1 >= board.fuseAt(it.x, it.y, it.z) } ?: return out
+            val cube = cubesOf(PieceType.CRACKED).firstOrNull { top - it.y - 1 >= board.fuseAt(it.x, it.y, it.z) } ?: return out
             board.removeAt(cube.x, cube.y, cube.z)
-            out += cube
+            out += Break(cube, PieceType.CRACKED, BreakCause.CRUMBLE)
         }
     }
 
-    private fun crackedCubes() = sequence {
+    /** Every tower cube of [type]. */
+    private fun cubesOf(type: PieceType) = sequence {
         for (i in board.cells) {
             val x = Board.xOf(i)
             val z = Board.zOf(i)
-            for (y in 0 until board.height(x, z)) if (board.fuseAt(x, y, z) > 0) yield(Vec3i(x, y, z))
+            for (y in board.base(x, z) until board.height(x, z)) if (board.typeAt(x, y, z) == type) yield(Vec3i(x, y, z))
+        }
+    }
+
+    /**
+     * A Glass Block shatters when a cube of the landing piece drops onto it (settles down onto it rather than landing
+     * flush). Highest first, so the positions of lower ones stay valid.
+     */
+    private fun shatterGlass(placed: List<PlacedCube>): List<Break> {
+        val glass = placed.filter { it.from.y > it.to.y }
+            .map { Vec3i(it.to.x, it.to.y - 1, it.to.z) }
+            .filter { it.y >= board.base(it.x, it.z) && board.typeAt(it.x, it.y, it.z) == PieceType.GLASS }
+            .distinct().sortedByDescending { it.y }
+        for (g in glass) board.removeAt(g.x, g.y, g.z)
+        return glass.map { Break(it, PieceType.GLASS, BreakCause.SHATTER) }
+    }
+
+    /** Every Dynamite Block's fuse burns down by one landing; one that runs out destroys its whole layer. */
+    private fun tickDynamite(): List<Break> {
+        for (d in cubesOf(PieceType.DYNAMITE).toList()) board.setFuse(d.x, d.y, d.z, board.fuseAt(d.x, d.y, d.z) - 1)
+        val out = ArrayList<Break>()
+        while (true) {
+            val d = cubesOf(PieceType.DYNAMITE).firstOrNull { board.fuseAt(it.x, it.y, it.z) <= 0 } ?: return out
+            // Other Dynamite in the same layer goes with it.
+            for (i in board.cells) {
+                val x = Board.xOf(i)
+                val z = Board.zOf(i)
+                if (d.y < board.base(x, z) || d.y >= board.height(x, z)) continue
+                out += Break(Vec3i(x, d.y, z), board.removeAt(x, d.y, z), BreakCause.DYNAMITE)
+            }
         }
     }
 
@@ -527,7 +596,7 @@ class GameLogic(
         for (x in center.x - 1..center.x + 1) for (z in center.z - 1..center.z + 1) {
             if (!board.inside(x, z)) continue
             val h = board.height(x, z)
-            val lo = max(0, center.y - BLAST_DOWN)
+            val lo = max(board.base(x, z), center.y - BLAST_DOWN)
             val hi = minOf(h - 1, center.y + BLAST_UP)
             if (hi < lo) continue
             for (y in hi downTo lo) cleared += Vec3i(x, y, z) to board.removeAt(x, y, z)
@@ -627,6 +696,13 @@ class GameLogic(
         /** A cracked cube crumbles once this many layers (picked at random per cube) sit above it. */
         const val CRACK_MIN_LAYERS = 10
         const val CRACK_MAX_LAYERS = 15
+        const val GLASS_BONUS = 60
+        /** Landings a Dynamite Block waits before it goes off (picked at random per block). */
+        const val DYNAMITE_MIN_FUSE = 3
+        const val DYNAMITE_MAX_FUSE = 5
+        const val DYNAMITE_POINTS_PER_CUBE = 30
+        /** Pieces that fall at the starting speed after a Freeze Block lands. */
+        const val FREEZE_PIECES = 5
         const val MYSTERY_GOLD_COINS = 10
         const val MYSTERY_MULTIPLIER_STEP = 3
         /** Chance that a shop special comes attached to a regular piece instead of as a lone cube. */

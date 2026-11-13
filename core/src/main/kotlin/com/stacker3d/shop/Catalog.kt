@@ -200,7 +200,7 @@ object Catalog {
 
     /**
      * Spawn chances are per piece. Hearts stay scarce (X pieces alone are 8%) so losing one still matters:
-     * about one heal per run at level 1, two or three fully upgraded. All five together top out near 12%.
+     * about one heal per run at level 1, two or three fully upgraded. All eight together top out near 20%.
      */
     val specials = listOf(
         SpecialBlock(PieceType.HEART, "special_heart", "HEART BLOCK", "+1 HEART", 250, 0.004f, 0.0015f, "textures/cube_heart.png"),
@@ -214,6 +214,15 @@ object Catalog {
             "textures/cube_cracked.png",
         ),
         SpecialBlock(PieceType.MYSTERY, "special_mystery", "MYSTERY BLOCK", "ANY EFFECT", 500, 0.003f, 0.001f, "textures/cube_mystery.png"),
+        SpecialBlock(
+            PieceType.DYNAMITE, "special_dynamite", "DYNAMITE", "BLOWS UP A LAYER", 250, 0.01f, 0.0035f,
+            "textures/cube_dynamite.png",
+        ),
+        SpecialBlock(
+            PieceType.GLASS, "special_glass", "GLASS BLOCK", "+60 PTS, FRAGILE", 150, 0.015f, 0.00375f,
+            "textures/cube_glass.png",
+        ),
+        SpecialBlock(PieceType.FREEZE, "special_freeze", "FREEZE BLOCK", "SLOWS 5 PIECES", 150, 0.015f, 0.00375f, "textures/cube_freeze.png"),
     )
 
     val items: List<ShopItem> =
